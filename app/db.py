@@ -38,6 +38,18 @@ CREATE TABLE IF NOT EXISTS settings(
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS vocab(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  term TEXT NOT NULL,                          -- mot ou expression sélectionné
+  book_id TEXT NOT NULL,
+  book_title TEXT NOT NULL DEFAULT '',         -- copié : l'entrée survit à la suppression du livre
+  idx INTEGER NOT NULL,
+  page INTEGER NOT NULL DEFAULT 0,
+  original TEXT NOT NULL DEFAULT '',           -- passage d'origine (contexte)
+  translation TEXT NOT NULL DEFAULT '',        -- traduction du passage, si elle existe
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS embeddings(
   book_id TEXT NOT NULL,
   idx INTEGER NOT NULL,

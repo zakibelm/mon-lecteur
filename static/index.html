@@ -1,91 +1,154 @@
 <!doctype html>
-<html lang="fr">
+<html lang="fr" class="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#1f2937">
+  <meta name="theme-color" content="#121316">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon-192.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Merriweather:ital,wght@0,400;0,700;1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
-  <title>Lecteur de livres</title>
+  <title>Mon Lecteur</title>
 </head>
 <body>
-  <header>
-    <nav>
-      <button data-view="library" class="tab active">📚 Bibliothèque</button>
-      <button data-view="reader" class="tab">📖 Lecture</button>
-      <button data-view="chat" class="tab">💬 Discussion</button>
-      <button data-view="settings" class="tab">⚙️ Réglages</button>
-    </nav>
-    <button id="btn-theme" title="Mode sombre">🌙</button>
+  <!-- En-tête -->
+  <header class="topbar">
+    <div class="brand"><span class="logo">M</span><span class="brand-name">Mon Lecteur</span></div>
+    <div class="top-actions">
+      <button id="btn-search" class="icon-btn" title="Rechercher un livre" aria-label="Rechercher un livre">
+        <svg viewBox="0 0 24 24"><path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+      </button>
+      <button id="btn-theme" class="icon-btn" title="Thème clair / sombre" aria-label="Thème clair ou sombre">
+        <svg viewBox="0 0 24 24"><path d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
+      </button>
+      <button data-view="settings" class="icon-btn tab" title="Réglages : modèles et voix" aria-label="Réglages">
+        <svg viewBox="0 0 24 24"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+      </button>
+    </div>
   </header>
 
   <main>
+    <!-- 1. Bibliothèque -->
     <section id="view-library" class="view">
-      <form id="upload-form">
-        <input type="file" id="file" accept=".pdf,.png,.jpg,.jpeg" multiple required aria-label="Un ou plusieurs livres">
-        <p id="file-info" class="muted" style="margin:0">Tu peux choisir plusieurs fichiers à la fois (jusqu'à 1 Go chacun).</p>
-        <input type="text" id="title" placeholder="Titre (optionnel, pour un seul fichier)">
-        <select id="lang" aria-label="Langue du document"></select>
-        <p class="muted" style="margin:0">Scans chinois, japonais, coréen ou arabe : l'écriture est reconnue automatiquement. Seul le chinois traditionnel doit être choisi ici.</p>
-        <label class="check"><input type="checkbox" id="translate" checked> Traduire en français si le document est dans une autre langue</label>
-        <button type="submit">Importer</button>
-      </form>
-      <progress id="upload-bar" max="1" value="0" hidden></progress>
-      <p id="upload-msg" class="muted"></p>
+      <input type="search" id="lib-search" class="field" placeholder="Rechercher par titre…" hidden aria-label="Rechercher par titre">
+      <div id="resume"></div>
+      <div id="prep-cards"></div>
+
+      <details id="import-card" class="card">
+        <summary class="card-title">＋ Importer des livres</summary>
+        <form id="upload-form">
+          <input type="file" id="file" accept=".pdf,.png,.jpg,.jpeg" multiple required aria-label="Un ou plusieurs livres">
+          <p id="file-info" class="muted">Tu peux choisir plusieurs fichiers à la fois.</p>
+          <input type="text" id="title" class="field" placeholder="Titre (optionnel, pour un seul fichier)">
+          <select id="lang" class="field" aria-label="Langue du document"></select>
+          <p class="muted">Scans chinois, japonais, coréen ou arabe : l'écriture est reconnue automatiquement. Seul le chinois traditionnel doit être choisi ici.</p>
+          <label class="check"><input type="checkbox" id="translate" checked> Traduire en français si le document est dans une autre langue</label>
+          <button type="submit" class="btn-primary">Importer</button>
+        </form>
+        <progress id="upload-bar" max="1" value="0" hidden></progress>
+        <p id="upload-msg" class="muted"></p>
+      </details>
+
+      <h2 class="section-title">Mes livres</h2>
       <ul id="books"></ul>
     </section>
 
+    <!-- 2. Lecture -->
     <section id="view-reader" class="view" hidden>
-      <label id="book-pick-wrap" class="pick">Livre : <select id="book-pick" aria-label="Choisir le livre à lire"></select></label>
-      <h2 id="book-title">Aucun livre ouvert</h2>
+      <label id="book-pick-wrap" class="pick"><span class="muted">Livre</span><select id="book-pick" class="field" aria-label="Choisir le livre à lire"></select></label>
+      <h1 id="book-title" class="book-title">Aucun livre ouvert</h1>
       <p id="book-status" class="muted"></p>
       <div id="reader-tools" hidden>
-        <button id="btn-orig" title="Afficher le texte d'origine sous la traduction">🈯 Original</button>
-        <div id="prep-box" class="prep">
-          <button id="btn-prep">⚡ Préparer tout le livre à l'avance</button>
-          <span id="prep-msg" class="muted"></span>
+        <div class="toolbar">
+          <button id="btn-prev" class="chip" aria-label="Passage précédent">⏮ Passage</button>
+          <button id="btn-next" class="chip" aria-label="Passage suivant">Passage ⏭</button>
+          <select id="speed" class="chip" aria-label="Vitesse">
+            <option value="0.8">0.8×</option><option value="1" selected>1×</option>
+            <option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option>
+          </select>
+          <select id="voice" class="chip" aria-label="Voix de lecture">
+            <option value="femme">👩 Femme</option><option value="homme">👨 Homme</option>
+          </select>
+          <button id="btn-orig" class="chip" aria-pressed="true" title="Afficher l'original au-dessus de la traduction">Bilingue</button>
+          <button id="btn-listen" class="chip" title="Écoute seule (masque le texte)">Écoute seule</button>
+          <span id="pos" class="muted"></span>
         </div>
-        <details id="book-opts"><summary>Options du livre</summary>
+        <div id="prep-box" class="card prep">
+          <div class="prep-head"><span class="card-title">Préparation à l'avance</span><span id="prep-pct" class="pill"></span></div>
+          <div class="bar"><div id="prep-fill"></div></div>
+          <p id="prep-msg" class="muted"></p>
+          <button id="btn-prep" class="btn-outline">⚡ Préparer tout le livre à l'avance</button>
+        </div>
+        <details id="book-opts" class="card"><summary class="card-title">Options du livre</summary>
           <label class="check"><input type="checkbox" id="chk-translate"> Traduire en français</label>
           <div class="row">
-            <button id="btn-retr">↻ Retraduire ce passage</button>
-            <button id="btn-retr-all">↻ Retraduire tout le livre</button>
-            <button id="btn-reindex">⟳ Réindexer la discussion</button>
+            <button id="btn-retr" class="btn-outline">↻ Retraduire ce passage</button>
+            <button id="btn-retr-all" class="btn-outline">↻ Retraduire tout le livre</button>
+            <button id="btn-reindex" class="btn-outline">⟳ Réindexer la discussion</button>
           </div>
         </details>
       </div>
       <div id="text"></div>
     </section>
 
+    <!-- 3. Discussion -->
     <section id="view-chat" class="view" hidden>
+      <p id="chat-book" class="muted">Pose une question sur le livre ouvert.</p>
       <div id="chat-log"></div>
       <form id="chat-form">
-        <input type="text" id="question" placeholder="Pose une question sur le livre…" required maxlength="1000">
-        <button type="submit">Envoyer</button>
+        <input type="text" id="question" class="field" placeholder="Pose une question sur le livre…" required maxlength="1000">
+        <button type="submit" class="btn-primary">Envoyer</button>
       </form>
     </section>
 
+    <!-- 4. Vocabulaire -->
+    <section id="view-vocab" class="view" hidden>
+      <div class="row">
+        <input type="search" id="vocab-search" class="field grow" placeholder="Rechercher un mot…" aria-label="Rechercher dans le vocabulaire">
+        <button id="btn-vocab-csv" class="btn-outline">Exporter CSV</button>
+      </div>
+      <p class="muted">Pour ajouter un mot : dans Lecture, sélectionne-le dans le texte puis appuie sur « ＋ Vocabulaire ».</p>
+      <ul id="vocab-list"></ul>
+    </section>
+
+    <!-- Réglages (icône engrenage) -->
     <section id="view-settings" class="view" hidden>
-      <h2>Réglages</h2>
+      <h1 class="book-title">Réglages</h1>
       <form id="settings-form" autocomplete="off"></form>
     </section>
   </main>
 
-  <footer id="player" hidden>
-    <button id="btn-prev" aria-label="Précédent">⏮</button>
-    <button id="btn-play" aria-label="Lecture / pause">▶️</button>
-    <button id="btn-next" aria-label="Suivant">⏭</button>
-    <select id="speed" aria-label="Vitesse">
-      <option value="0.8">0.8×</option><option value="1" selected>1×</option>
-      <option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option>
-    </select>
-    <select id="voice" aria-label="Voix de lecture">
-      <option value="femme">👩 Femme</option><option value="homme">👨 Homme</option>
-    </select>
-    <button id="btn-listen" title="Écoute seule (masque le texte)">👁</button>
-    <span id="pos" class="muted"></span>
-  </footer>
+  <!-- Ajout au vocabulaire depuis une sélection -->
+  <button id="vocab-add" class="btn-primary floating" hidden>＋ Vocabulaire</button>
+
+  <!-- Mini-lecteur audio persistant -->
+  <div id="player" class="miniplayer" hidden>
+    <div class="mp-info">
+      <span class="mp-icon"><svg viewBox="0 0 24 24"><path d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg></span>
+      <div class="mp-text">
+        <p id="mp-title">—</p>
+        <p id="mp-sub" class="muted"></p>
+      </div>
+    </div>
+    <div class="mp-ctrl">
+      <button id="btn-back10" class="icon-btn" title="Reculer de 10 s" aria-label="Reculer de 10 secondes">−10</button>
+      <button id="btn-play" class="play-btn" aria-label="Lecture / pause">
+        <svg id="ico-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+        <svg id="ico-pause" viewBox="0 0 24 24" hidden><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+      </button>
+      <button id="btn-fwd10" class="icon-btn" title="Avancer de 10 s" aria-label="Avancer de 10 secondes">+10</button>
+    </div>
+  </div>
+
+  <!-- Onglets -->
+  <nav class="tabbar">
+    <button data-view="library" class="tab active"><svg viewBox="0 0 24 24"><path d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/></svg><span>Bibliothèque</span></button>
+    <button data-view="reader" class="tab"><svg viewBox="0 0 24 24"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg><span>Lecture</span></button>
+    <button data-view="chat" class="tab"><svg viewBox="0 0 24 24"><path d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"/></svg><span>Discussion</span></button>
+    <button data-view="vocab" class="tab"><svg viewBox="0 0 24 24"><path d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z"/></svg><span>Vocabulaire</span></button>
+  </nav>
 
   <audio id="audio" preload="auto"></audio>
   <script src="app.js"></script>

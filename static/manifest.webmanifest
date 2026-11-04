@@ -1,10 +1,10 @@
 {
-  "name": "Lecteur de livres",
+  "name": "Mon Lecteur",
   "short_name": "Lecteur",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#0f172a",
-  "theme_color": "#1f2937",
+  "background_color": "#121316",
+  "theme_color": "#121316",
   "icons": [
     { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
     { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }

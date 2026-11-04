@@ -74,6 +74,13 @@ class Retranslate(BaseModel):
     idx: int | None = Field(default=None, ge=0)     # None = tout le livre
 
 
+class VocabIn(BaseModel):
+    book_id: str = Field(min_length=1, max_length=40)
+    idx: int = Field(ge=0)
+    term: str = Field(min_length=1, max_length=300)
+    note: str = Field(default="", max_length=1000)
+
+
 class Prepare(BaseModel):
     stop: bool = False
 
@@ -197,7 +204,8 @@ def list_books():
         rows = c.execute(
             "SELECT b.*, (SELECT COUNT(*) FROM segments s WHERE s.book_id=b.id) AS n_segments "
             "FROM books b ORDER BY created_at DESC").fetchall()
-    return [dict(r) for r in rows]
+    # « préparing » = préparation complète demandée (⚡), pas la simple avance de lecture
+    return [{**dict(r), "preparing": prepare.preparer.busy(r["id"]) and r["id"] in prepare.preparer.whole} for r in rows]
 
 
 @app.get("/api/books/{book_id}", dependencies=[Depends(auth)])
@@ -407,6 +415,56 @@ def llm_test(body: RoleTest):
     except LLMError as e:
         raise HTTPException(502, str(e))
     return {"ok": True, "model": label, "sample": sample, "ms": int((time.time() - t0) * 1000)}
+
+
+# ---------- Vocabulaire ----------
+@app.get("/api/vocab", dependencies=[Depends(auth)])
+def vocab_list(q: str = ""):
+    with db() as c:
+        rows = c.execute("SELECT * FROM vocab WHERE term LIKE ? OR original LIKE ? OR translation LIKE ? "
+                         "ORDER BY id DESC LIMIT 2000", (f"%{q}%", f"%{q}%", f"%{q}%")).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/vocab", dependencies=[Depends(auth)])
+def vocab_add(body: VocabIn):
+    term = " ".join(body.term.split())
+    with db() as c:
+        book = _book_or_404(c, body.book_id)
+        seg = c.execute("SELECT s.page, s.text, t.text AS tr FROM segments s LEFT JOIN translations t "
+                        "ON t.book_id=s.book_id AND t.idx=s.idx WHERE s.book_id=? AND s.idx=?",
+                        (body.book_id, body.idx)).fetchone()
+        if not seg:
+            raise HTTPException(404, "Passage introuvable")
+        dup = c.execute("SELECT id FROM vocab WHERE book_id=? AND idx=? AND term=?", (body.book_id, body.idx, term)).fetchone()
+        if dup:
+            return {"id": dup["id"], "duplicate": True}
+        cur = c.execute("INSERT INTO vocab(term, book_id, book_title, idx, page, original, translation, note) "
+                        "VALUES(?,?,?,?,?,?,?,?)", (term, body.book_id, book["title"], body.idx, seg["page"],
+                                                     seg["text"], seg["tr"] or "", body.note.strip()))
+    return {"id": cur.lastrowid, "duplicate": False}
+
+
+@app.delete("/api/vocab/{vocab_id}", dependencies=[Depends(auth)])
+def vocab_delete(vocab_id: int):
+    with db() as c:
+        if not c.execute("DELETE FROM vocab WHERE id=?", (vocab_id,)).rowcount:
+            raise HTTPException(404, "Entrée introuvable")
+    return {"ok": True}
+
+
+@app.get("/api/vocab.csv", dependencies=[Depends(auth)])
+def vocab_csv():
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf, delimiter=";")
+    w.writerow(["terme", "passage d'origine", "traduction", "livre", "page", "note", "ajouté le"])
+    with db() as c:
+        for r in c.execute("SELECT * FROM vocab ORDER BY id"):
+            w.writerow([r["term"], r["original"], r["translation"], r["book_title"], r["page"], r["note"], r["created_at"]])
+    return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",      # BOM : accents corrects dans Excel
+                    headers={"Content-Disposition": 'attachment; filename="vocabulaire.csv"'})
 
 
 @app.delete("/api/books/{book_id}", dependencies=[Depends(auth)])

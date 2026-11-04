@@ -497,6 +497,22 @@ def v22_tests(c):
     assert c.post(f"/api/books/{big}/chat", headers=H, json={"question": "paragraphe"}).status_code == 200
     print(f"✔ indexation interrompue : reprise au démarrage et par « Réindexer » sans tout refaire ({total} passages)")
 
+    # --- vocabulaire : contexte copié, doublon ignoré, recherche, export CSV, survit au livre supprimé ---
+    v = c.post("/api/vocab", headers=H, json={"book_id": big, "idx": 2, "term": "  numéro   2 "}).json()
+    assert not v["duplicate"]
+    assert c.post("/api/vocab", headers=H, json={"book_id": big, "idx": 2, "term": "numéro 2"}).json()["duplicate"]
+    assert c.post("/api/vocab", headers=H, json={"book_id": big, "idx": 99999, "term": "x"}).status_code == 404
+    assert c.post("/api/vocab", headers=H, json={"book_id": "inconnu", "idx": 0, "term": "x"}).status_code == 404
+    lst = c.get("/api/vocab", headers=H, params={"q": "numéro"}).json()
+    assert len(lst) == 1 and lst[0]["term"] == "numéro 2" and "Paragraphe numéro 2" in lst[0]["original"], lst
+    csv_ = c.get("/api/vocab.csv", headers=H)
+    assert csv_.status_code == 200 and "numéro 2" in csv_.text and csv_.text.startswith("\ufeffterme;"), csv_.text[:80]
+    assert c.get("/api/vocab.csv").status_code == 401
+    assert c.get("/api/books", headers=H).json()[0].get("preparing") is False
+    assert c.delete(f"/api/vocab/{v['id']}", headers=H).json()["ok"] and c.get("/api/vocab", headers=H).json() == []
+    assert c.delete(f"/api/vocab/{v['id']}", headers=H).status_code == 404
+    print("✔ vocabulaire : ajout avec contexte, doublon ignoré, recherche, export CSV (BOM), suppression")
+
     # --- traduction groupée : un paragraphe de 5 passages = UN appel au modèle ---
     zh5 = ["第一句话在这里。", "第二句话在那里。", "第三句话很短。", "第四句话也很短。", "第五句话结束了。"]
     doc = fitz.open(); pg = doc.new_page()
@@ -701,7 +717,7 @@ def main():
         assert c.delete(f"/api/books/{bid}", headers=H).status_code == 200
         assert c.get(f"/api/books/{bid}", headers=H).status_code == 404
         assert not (config.DATA_DIR / "books" / bid).exists()
-        assert "Lecteur de livres" in c.get("/").text
+        assert "<title>Mon Lecteur</title>" in c.get("/").text
         print("✔ suppression, traversal de chemin bloqué, PWA servie")
         v22_tests(c)
     print("\nTOUS LES TESTS PASSENT")

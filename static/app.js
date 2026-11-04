@@ -5,7 +5,10 @@ const st = {
   auth: localStorage.getItem("token") || "", cfg: null, book: null, segs: [], cur: -1,
   playing: false, playId: 0, speed: 1, cache: new Map(), reads: new Map(), poll: null, saveTimer: null,
   lastPage: 0, settings: null, models: {}, fresh: new Set(), libPoll: null,
+  prepRate: {}, books: [], vocab: [],
 };
+// Noms réels des voix Piper (aucune voix inventée à l'écran)
+const VOICE_NAMES = { fr: { femme: "siwis", homme: "tom" }, en: { femme: "lessac", homme: "ryan" }, ar: { homme: "kareem" } };
 
 /* ---------- API ---------- */
 function askToken() {
@@ -43,11 +46,16 @@ function showView(name) {
   for (const t of document.querySelectorAll(".tab")) t.classList.toggle("active", t.dataset.view === name);
   if (name === "library") loadLibrary().catch((e) => ($("#upload-msg").textContent = e.message));
   if (name === "settings") loadSettings().catch((e) => ($("#settings-form").textContent = e.message));
+  if (name === "vocab") loadVocab().catch((e) => ($("#vocab-list").textContent = e.message));
+  if (name === "chat") $("#chat-book").textContent = st.book ? `Questions sur « ${st.book.title} »` : "Ouvre d'abord un livre dans Lecture.";
+  if (name === "reader" && st.book) refreshPrep().catch(() => {});
+  $("#lib-search").hidden = name !== "library" || !st.searchOpen;
+  window.scrollTo({ top: 0 });
 }
-function applyTheme() {
-  const saved = localStorage.getItem("dark");
-  const dark = saved === null ? matchMedia("(prefers-color-scheme: dark)").matches : saved === "1";
+function applyTheme() {                    // Nocturne (sombre) par défaut, « Papier chaud » au choix
+  const dark = localStorage.getItem("dark") !== "0";
   document.documentElement.classList.toggle("dark", dark);
+  document.querySelector('meta[name="theme-color"]').content = dark ? "#121316" : "#f7f3ec";
 }
 
 /* ---------- Bibliothèque ---------- */
@@ -73,28 +81,102 @@ function el(tag, text, cls) {
   if (cls) e.className = cls;
   return e;
 }
+const LANG_SHORT = { fr: "FR", en: "EN", ar: "AR", zh: "ZH", "zh-tw": "ZH", ja: "JA", ko: "KO" };
+function langBadge(b) {
+  const l = LANG_SHORT[b.lang] || (b.lang || "").toUpperCase();
+  return b.lang && b.lang !== "fr" && b.lang !== "auto" ? (b.translate ? `${l}→FR` : l) : "";
+}
+function pct(b) { return b.n_segments ? Math.min(100, Math.round((100 * (b.progress_idx + 1)) / b.n_segments)) : 0; }
+function bar(p) { const d = el("div", undefined, "bar"), f = el("div"); f.style.width = p + "%"; d.append(f); return d; }
+const STOP = new Set(["le", "la", "les", "l", "un", "une", "des", "du", "de", "d", "the", "a", "an", "of", "et", "and"]);
+function initials(t) {                          // « La ville ancienne » → VA ; « Les saisons » → S
+  const words = (t.match(/[\p{L}\p{N}]+/gu) || []).filter((w) => !STOP.has(w.toLowerCase()));
+  return (words.length ? words.slice(0, 2).map((w) => w[0]).join("") : (t.trim()[0] || "?")).toUpperCase();
+}
+
 async function loadLibrary() {
   const books = await jget("/books");
+  st.books = books;
   fillBookPick(books);
-  const ul = $("#books");
+  clearTimeout(st.libPoll);                       // extraction ou préparation en cours : la liste se met à jour seule
+  if (books.some((b) => b.status === "processing" || b.preparing) && !$("#view-library").hidden)
+    st.libPoll = setTimeout(() => loadLibrary().catch(() => {}), 5000);
+  renderResume(books);
+  if (!st.importTouched && !books.length) $("#import-card").open = true;   // ouvert seulement s'il n'y a aucun livre
+  renderPrepCards(books.filter((b) => b.preparing)).catch(() => {});
+  renderBooks();
+}
+function renderResume(books) {
+  const box = $("#resume"); box.replaceChildren();
+  const b = (st.book && books.find((x) => x.id === st.book.id)) || books.find((x) => x.status === "ready" && x.progress_idx > 0);
+  if (!b) return;
+  const c = el("div", undefined, "card resume");
+  const t = el("h3", b.title, "book-title");
+  const badge = langBadge(b); if (badge) t.append(el("span", badge, "badge"));
+  const p = pct(b);
+  const go = el("button", st.book && st.book.id === b.id && st.playing ? "Revenir à la lecture" : "Continuer la lecture", "btn-primary");
+  go.onclick = () => readBook(b.id);
+  c.append(el("span", "Reprendre la lecture", "card-title"), t,
+           el("p", `Passage ${b.progress_idx + 1} sur ${b.n_segments} · ${p} %`, "muted"), bar(p), go);
+  box.append(c);
+}
+async function renderPrepCards(list) {
+  const box = $("#prep-cards");
+  if (!list.length) { box.replaceChildren(); return; }
+  if (!st.settings) st.settings = await jget("/settings").catch(() => null);
+  const cards = [];
+  for (const b of list) {
+    const p = await jget(`/books/${b.id}/prepare`).catch(() => null);
+    if (!p || !p.whole || p.ready >= p.total) continue;      // terminé : la carte disparaît
+    cards.push(prepCard(b, p));
+  }
+  box.replaceChildren(...cards);
+}
+function eta(bookId, p) {                        // temps restant à partir de la vitesse MESURÉE (jamais supposée)
+  const now = Date.now(), r = st.prepRate[bookId];
+  if (!r || p.ready < r.ready) { st.prepRate[bookId] = { t0: now, ready0: p.ready, ready: p.ready }; return ""; }
+  r.ready = p.ready;
+  const done = p.ready - r.ready0, sec = (now - r.t0) / 1000;
+  if (done < 2 || sec < 20) return " · temps restant : mesure en cours…";
+  const left = ((p.total - p.ready) / done) * sec;
+  const txt = left > 5400 ? `~${Math.round(left / 3600)} h` : `~${Math.max(1, Math.round(left / 60))} min`;
+  return ` · ${txt} restantes (${(done / (sec / 60)).toFixed(1)} passages/min)`;
+}
+function prepCard(b, p) {
+  const c = el("div", undefined, "card prep-card prep");
+  const head = el("div", undefined, "prep-head");
+  const lab = el("span", undefined, "card-title");
+  lab.append(el("span", undefined, "dot" + (p.paused ? " pause" : "")),
+             document.createTextNode(p.paused ? "Préparation en pause" : "Préparation en cours"));
+  const percent = p.total ? Math.floor((100 * p.ready) / p.total) : 0;
+  head.append(lab, el("span", percent + " %", "pill"));
+  const r = st.settings && st.settings.roles.translate;
+  const engine = el("div", undefined, "engine");
+  engine.append(el("span", b.translate && b.lang !== "fr" && r ? `Traduction : ${r.provider} · ${r.model}` : "Audio seulement (pas de traduction)"),
+                el("span", p.current ? `passage ${p.current.idx + 1} · ${p.current.seconds} s` : ""));
+  c.append(head, el("h3", b.title, "book-title"),
+           el("p", p.paused ? p.paused : `${p.ready} / ${p.total} passages prêts${eta(b.id, p)}`, "muted"), bar(percent), engine);
+  return c;
+}
+function renderBooks() {
+  const ul = $("#books"), q = ($("#lib-search").value || "").trim().toLowerCase();
   ul.replaceChildren();
-  clearTimeout(st.libPoll);                       // extraction en cours : la liste se met à jour seule
-  if (books.some((b) => b.status === "processing") && !$("#view-library").hidden)
-    st.libPoll = setTimeout(() => loadLibrary().catch(() => {}), 3000);
-  for (const b of books) {
-    const li = el("li");
+  const list = st.books.filter((b) => !q || b.title.toLowerCase().includes(q));
+  for (const b of list) {
+    const li = el("li", undefined, "card book");
     if (st.fresh.has(b.id)) li.classList.add("fresh");
     const info = el("div");
-    const title = el("strong", b.title);
-    if (b.lang && b.lang !== "fr" && b.lang !== "auto") title.append(el("span", b.lang.toUpperCase(), "badge"));
-    info.append(title, el("div",
-      b.status === "processing" ? `Extraction ${b.pages_done}/${b.pages_total}`
-        : b.status === "error" ? "Erreur : " + b.error
-        : `${b.pages_total} p. · ${b.n_segments} passages`, "muted"));
+    const h = el("h3", b.title); const badge = langBadge(b); if (badge) h.append(el("span", badge, "badge"));
+    const meta = b.status === "processing" ? `Extraction : page ${b.pages_done}/${b.pages_total}`
+      : b.status === "error" ? "Erreur : " + b.error
+      : `${b.pages_total} p. · ${b.n_segments} passages` + (b.progress_idx > 0 ? ` · lu à ${pct(b)} %` : "") + (b.preparing ? " · préparation en cours" : "");
+    info.append(h, el("p", meta, "muted"));
+    if (b.status === "ready" && b.progress_idx > 0) info.append(bar(pct(b)));
     const actions = el("div", undefined, "actions");
-    const open = el("button", st.book && st.book.id === b.id ? "Reprendre" : "Lire");
+    const open = el("button", st.book && st.book.id === b.id ? "Reprendre" : "Lire", "btn-primary");
+    open.disabled = b.status === "error";
     open.onclick = () => readBook(b.id);
-    const del = el("button", "🗑");
+    const del = el("button", "🗑", "btn-danger"); del.title = "Supprimer"; del.setAttribute("aria-label", "Supprimer " + b.title);
     del.onclick = async () => {
       if (!confirm(`Supprimer « ${b.title} » ?`)) return;
       await api("/books/" + b.id, { method: "DELETE" });
@@ -102,11 +184,20 @@ async function loadLibrary() {
       loadLibrary();
     };
     actions.append(open, del);
-    li.append(info, actions);
+    info.append(actions);
+    li.append(el("div", initials(b.title), "cover"), info);
     ul.append(li);
   }
-  if (!books.length) ul.append(el("li", "Aucun livre pour l'instant.", "muted"));
+  if (!list.length) ul.append(el("li", q ? "Aucun livre ne correspond." : "Aucun livre pour l'instant : importe-en un ci-dessus.", "muted"));
 }
+$("#lib-search").oninput = renderBooks;
+$("#import-card > summary").addEventListener("click", () => { st.importTouched = true; });   // seul un appui de l'utilisateur compte
+$("#btn-search").onclick = () => {
+  st.searchOpen = !st.searchOpen;
+  if (st.searchOpen) showView("library");
+  $("#lib-search").hidden = !st.searchOpen;
+  if (st.searchOpen) $("#lib-search").focus(); else { $("#lib-search").value = ""; renderBooks(); }
+};
 
 $("#upload-form").onsubmit = async (ev) => {
   ev.preventDefault();
@@ -190,7 +281,8 @@ function uploadWithProgress(fd, onProgress) {
 function closeBook() {
   stopSound(); st.playId++; st.playing = false;
   st.book = null; st.segs = []; st.cur = -1; clearInterval(st.poll); st.reads.clear();
-  $("#player").hidden = true; $("#reader-tools").hidden = true; $("#text").replaceChildren(); $("#book-title").textContent = "Aucun livre ouvert";
+  $("#player").hidden = true; document.body.classList.remove("has-player");
+  $("#reader-tools").hidden = true; $("#text").replaceChildren(); $("#book-title").textContent = "Aucun livre ouvert";
   note("");
 }
 async function openBook(id) {
@@ -202,7 +294,7 @@ async function openBook(id) {
   refreshPrep().catch(() => {});
   jget("/books").then(fillBookPick).catch(() => {});
   await loadMoreSegments();
-  $("#player").hidden = false; $("#reader-tools").hidden = false;
+  $("#player").hidden = false; document.body.classList.add("has-player"); $("#reader-tools").hidden = false;
   showView("reader");
   updateStatus();
   if (st.segs.length) highlight(Math.min(st.book.progress_idx, st.segs.length - 1), true);
@@ -219,11 +311,14 @@ async function pollBook() {
 }
 /* ---------- Préparation à l'avance (traduction + audio côté serveur) ---------- */
 function showPrep(p) {
-  const pct = p.total ? Math.floor((100 * p.ready) / p.total) : 0;
+  const percent = p.total ? Math.floor((100 * p.ready) / p.total) : 0;
   $("#btn-prep").textContent = p.running && p.whole ? "⏹ Arrêter la préparation" : "⚡ Préparer tout le livre à l'avance";
-  $("#prep-msg").textContent = `Prêt à l'écoute sans attente : ${p.ready}/${p.total} passages (${pct} %)`
+  $("#prep-pct").textContent = percent + " %";
+  $("#prep-fill").style.width = percent + "%";
+  $("#prep-msg").textContent = `${p.ready} / ${p.total} passages prêts à l'écoute sans attente`
     + (p.paused ? ` — en pause : ${p.paused}` : p.current ? ` — passage ${p.current.idx + 1} en cours depuis ${p.current.seconds} s`
        : p.running ? (p.whole ? " — préparation en cours, même écran éteint ou app fermée" : " — les suivants se préparent") : "")
+    + (p.running && st.book ? eta(st.book.id, p) : "")
     + (p.error ? ` — arrêtée : ${p.error}` : "");
   clearTimeout(st.prepPoll);
   if (p.running && st.book && !$("#view-reader").hidden)
@@ -251,26 +346,32 @@ async function loadMoreSegments() {
   }
 }
 function addSegment(s) {
-  const p = el("p");
-  p.dataset.idx = s.idx;
-  if (s.page !== st.lastPage) { p.append(el("span", "Page " + s.page, "page-tag")); st.lastPage = s.page; }
-  p.append(el("span", "", "t"), el("span", "", "orig"));
-  p.onclick = () => { unlockAudio(); play(s.idx); };
-  $("#text").append(p);
+  if (s.page !== st.lastPage) { $("#text").append(el("div", "Page " + s.page, "page-tag")); st.lastPage = s.page; }
+  const c = el("article", undefined, "seg");
+  c.dataset.idx = s.idx;
+  const head = el("div", undefined, "seg-head");
+  const live = el("span", undefined, "live");
+  head.append(el("span", "Passage " + (s.idx + 1)), live);
+  c.append(head, el("p", "", "orig"), el("div", undefined, "sep"), el("p", "", "t"));
+  c.onclick = () => { if (String(getSelection()).trim()) return; unlockAudio(); play(s.idx); };
+  $("#text").append(c);
   st.segs.push(s);
   paint(s.idx);
 }
-/* Affiche un segment : traduction française (ou original en italique tant qu'elle n'est pas faite) + original masquable. */
+/* Carte bilingue : original (discret) puis traduction française en serif. Sans traduction : le texte seul. */
 function paint(idx) {
-  const s = st.segs[idx], p = document.querySelector(`#text p[data-idx="${idx}"]`);
-  if (!s || !p) return;
-  const t = p.querySelector(".t");
+  const s = st.segs[idx], c = segEl(idx);
+  if (!s || !c) return;
+  const t = c.querySelector(".t");
   t.textContent = s.text;
   t.classList.toggle("pending", !!s.pending);
-  p.querySelector(".orig").textContent = (s.translated || s.pending) ? s.original : "";
-  p.querySelector(".warn")?.remove();
-  if (s.error) { const w = el("span", "⚠ " + s.error, "warn"); p.append(w); }
+  const bi = !!(s.translated || s.pending);
+  c.classList.toggle("bi", bi);
+  c.querySelector(".orig").textContent = bi ? s.original : "";
+  c.querySelector(".warn")?.remove();
+  if (s.error) c.append(el("span", "⚠ " + s.error, "warn"));
 }
+const segEl = (idx) => document.querySelector(`#text .seg[data-idx="${idx}"]`);
 function readInfo(idx) {                          // traduction à la demande, mise en cache côté serveur ET ici
   if (!st.book || !st.segs[idx]) return Promise.resolve(null);
   if (!st.reads.has(idx)) {
@@ -290,13 +391,14 @@ function readInfo(idx) {                          // traduction à la demande, m
 }
 function forgetReads() { st.reads.clear(); for (const [, p] of st.cache) p.then((u) => u && URL.revokeObjectURL(u)).catch(() => {}); st.cache.clear(); }
 function highlight(idx, scroll) {
-  document.querySelector("#text p.active")?.classList.remove("active");
-  const p = document.querySelector(`#text p[data-idx="${idx}"]`);
+  document.querySelector("#text .seg.active")?.classList.remove("active");
+  const p = segEl(idx);
   if (!p) return;
   p.classList.add("active");
   if (scroll !== false) p.scrollIntoView({ block: "center", behavior: "smooth" });
   st.cur = idx;
   $("#pos").textContent = `p.${st.segs[idx].page} · ${idx + 1}/${st.segs.length}`;
+  updateMiniPlayer();
   clearTimeout(st.saveTimer);
   st.saveTimer = setTimeout(() => api(`/books/${st.book.id}/progress`, {
     method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ idx }),
@@ -324,8 +426,27 @@ function trimCache(idx) {                       // garde peu de blobs en mémoir
   }
 }
 function stopSound() { audio.pause(); speechSynthesis.cancel(); }
+function voiceLabel() {
+  const s = st.segs[st.cur];
+  if (!st.cfg || !st.cfg.server_audio) return "Voix de l'appareil";
+  const lang = s ? (s.translated ? "fr" : (s.lang && s.lang !== "und" ? s.lang : "fr")) : "fr";
+  const names = VOICE_NAMES[lang];
+  if (!names) return "Pas de voix serveur pour cette langue";
+  const g = names[st.cfg.voice] ? st.cfg.voice : Object.keys(names)[0];
+  return `Piper · ${names[g]} (${g}, ${lang.toUpperCase()})`;
+}
+function updateMiniPlayer() {
+  if (!st.book) return;
+  const s = st.segs[st.cur];
+  $("#mp-title").textContent = st.book.title + (s ? ` · p.${s.page}` : "");
+  const sub = $("#mp-sub"); sub.replaceChildren(el("b", voiceLabel()), document.createTextNode(` · ${st.speed}×` + (s ? ` · ${st.cur + 1}/${st.segs.length}` : "")));
+  const live = document.querySelector("#text .seg.active .live");
+  if (live) { live.replaceChildren(); if (st.playing) live.append(el("span", undefined, "ping"), document.createTextNode("Lecture audio en cours")); }
+}
 function setPlayIcon() {
-  $("#btn-play").textContent = st.playing ? "⏸" : "▶️";
+  $("#ico-play").hidden = st.playing; $("#ico-pause").hidden = !st.playing;
+  $("#btn-play").setAttribute("aria-label", st.playing ? "Pause" : "Lecture");
+  updateMiniPlayer();
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = st.playing ? "playing" : "paused";
 }
 
@@ -459,7 +580,11 @@ $("#chat-form").onsubmit = async (ev) => {
 async function reindexBook() { return jpost(`/books/${st.book.id}/reindex`); }
 
 /* ---------- Options du livre (traduction) ---------- */
-$("#btn-orig").onclick = () => $("#text").classList.toggle("show-orig");
+$("#btn-orig").onclick = (e) => {
+  const mono = $("#text").classList.toggle("mono");
+  e.currentTarget.setAttribute("aria-pressed", String(!mono));
+  localStorage.setItem("mono", mono ? "1" : "0");
+};
 $("#chk-translate").onchange = async (e) => {
   try {
     await jpost(`/books/${st.book.id}/options`, { translate: e.target.checked }, "PUT");
@@ -649,6 +774,71 @@ async function saveSettings(quiet, { roles: withRoles = true } = {}) {
 }
 $("#settings-form").onsubmit = (ev) => { ev.preventDefault(); saveSettings(false); };
 
+/* ---------- Vocabulaire ---------- */
+function selectedInReader() {                  // { term, idx } si une sélection est faite dans une carte du texte
+  const sel = getSelection(), term = String(sel).trim().replace(/\s+/g, " ");
+  if (!term || term.length > 300 || !sel.rangeCount || !st.book) return null;
+  const node = sel.getRangeAt(0).commonAncestorContainer;
+  const card = (node.nodeType === 1 ? node : node.parentElement)?.closest("#text .seg");
+  return card ? { term, idx: +card.dataset.idx } : null;
+}
+document.addEventListener("selectionchange", () => {
+  const s = !$("#view-reader").hidden && selectedInReader();
+  const b = $("#vocab-add");
+  b.hidden = !s;
+  if (s) b.textContent = `＋ Vocabulaire : « ${s.term.length > 24 ? s.term.slice(0, 24) + "…" : s.term} »`;
+});
+$("#vocab-add").onclick = async () => {
+  const s = selectedInReader();
+  if (!s) return;
+  try {
+    const r = await jpost("/vocab", { book_id: st.book.id, idx: s.idx, term: s.term });
+    note(r.duplicate ? `« ${s.term} » est déjà dans ton vocabulaire.` : `« ${s.term} » ajouté au vocabulaire.`);
+    getSelection().removeAllRanges();
+  } catch (e) { note(e.message); }
+  $("#vocab-add").hidden = true;
+};
+function withMark(text, term) {                 // contexte avec le terme surligné (sans HTML injecté)
+  const f = document.createDocumentFragment(), i = text.toLowerCase().indexOf(term.toLowerCase());
+  if (i < 0) { f.append(text); return f; }
+  f.append(text.slice(0, i), el("mark", text.slice(i, i + term.length)), text.slice(i + term.length));
+  return f;
+}
+async function loadVocab() {
+  st.vocab = await jget("/vocab?q=" + encodeURIComponent($("#vocab-search").value.trim()));
+  const ul = $("#vocab-list"); ul.replaceChildren();
+  for (const v of st.vocab) {
+    const li = el("li", undefined, "card voc");
+    const q1 = el("blockquote"); q1.append(withMark(v.original, v.term));
+    li.append(el("p", v.term, "term"), q1);
+    if (v.translation) li.append(el("blockquote", v.translation, "tr"));
+    if (v.note) li.append(el("p", v.note, "muted"));
+    li.append(el("p", `${v.book_title} · p.${v.page}`, "muted"));
+    const row = el("div", undefined, "row");
+    const go = el("button", "Lire le passage", "btn-outline");
+    go.onclick = async () => {
+      if (!st.books.some((b) => b.id === v.book_id)) await jget("/books").then((b) => (st.books = b)).catch(() => {});
+      if (!st.books.some((b) => b.id === v.book_id)) { go.textContent = "Livre supprimé"; go.disabled = true; return; }
+      showView("reader");
+      if (!st.book || st.book.id !== v.book_id) await openBook(v.book_id);
+      highlight(v.idx);
+    };
+    const del = el("button", "🗑", "btn-danger"); del.setAttribute("aria-label", "Supprimer " + v.term);
+    del.onclick = async () => { await api("/vocab/" + v.id, { method: "DELETE" }); loadVocab().catch(() => {}); };
+    row.append(go, del); li.append(row);
+    ul.append(li);
+  }
+  if (!st.vocab.length) ul.append(el("li", $("#vocab-search").value ? "Aucun mot ne correspond." : "Ton vocabulaire est vide pour l'instant.", "muted"));
+}
+let vocabTimer;
+$("#vocab-search").oninput = () => { clearTimeout(vocabTimer); vocabTimer = setTimeout(() => loadVocab().catch(() => {}), 250); };
+$("#btn-vocab-csv").onclick = async () => {
+  const r = await api("/vocab.csv");
+  if (!r.ok) return;
+  const a = el("a"); a.href = URL.createObjectURL(await r.blob()); a.download = "vocabulaire.csv";
+  document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+};
+
 /* ---------- Câblage ---------- */
 for (const t of document.querySelectorAll(".tab")) t.onclick = () => showView(t.dataset.view);
 $("#btn-play").onclick = togglePlay;
@@ -659,25 +849,44 @@ $("#voice").onchange = async (e) => {
   for (const [, p] of st.cache) p.then((u) => u && URL.revokeObjectURL(u)).catch(() => {});
   st.cache.clear();                                     // les passages préparés l'étaient avec l'autre voix
   if (st.book && st.book.lang === "ar" && e.target.value === "femme") note("Arabe : seule une voix d'homme existe.");
+  updateMiniPlayer();
   if (st.playing) { unlockAudio(); play(st.cur); }
 };
 $("#btn-next").onclick = () => { unlockAudio(); next(); };
 $("#btn-prev").onclick = () => { unlockAudio(); prev(); };
 $("#speed").onchange = (e) => {
-  st.speed = parseFloat(e.target.value); audio.playbackRate = st.speed;
+  st.speed = parseFloat(e.target.value); audio.playbackRate = st.speed; updateMiniPlayer();
   if (st.playing && !st.cfg.server_audio) play(st.cur);       // le débit vocal ne change pas en cours de phrase
 };
-$("#btn-listen").onclick = () => $("#text").classList.toggle("listen-only");
+$("#btn-listen").onclick = (e) => {
+  const on = $("#text").classList.toggle("listen-only");
+  e.currentTarget.setAttribute("aria-pressed", String(on));
+  if (on && st.cur >= 0) segEl(st.cur)?.scrollIntoView({ block: "center" });
+};
 $("#btn-theme").onclick = () => {
   const dark = !document.documentElement.classList.contains("dark");
   localStorage.setItem("dark", dark ? "1" : "0"); applyTheme();
 };
+// ±10 s dans le passage en cours ; au-delà du début ou de la fin : passage précédent / suivant
+function seek(delta) {
+  if (!st.book) return;
+  unlockAudio();
+  const real = st.cfg.server_audio && audio.src && !isFiller() && audio.duration;
+  if (!real) return delta < 0 ? prev() : next();
+  const t = audio.currentTime + delta;
+  if (t < 0) return audio.currentTime > 2 ? (audio.currentTime = 0) : prev();
+  if (t >= audio.duration - 0.3) return next();
+  audio.currentTime = t;
+}
+$("#btn-back10").onclick = () => seek(-10);
+$("#btn-fwd10").onclick = () => seek(10);
 audio.onended = () => { if (!isFiller()) next(); };
 // pause imposée par le système (appel, autre app audio) : on reflète l'état au lieu de croire que ça joue encore
 audio.onpause = () => { if (st.playing && !isFiller() && !audio.ended && audio.currentTime < audio.duration) { st.playing = false; setPlayIcon(); } };
 
 (async function init() {
   applyTheme();
+  if (localStorage.getItem("mono") === "1") { $("#text").classList.add("mono"); $("#btn-orig").setAttribute("aria-pressed", "false"); }
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
   try {
     st.cfg = await jget("/config");
