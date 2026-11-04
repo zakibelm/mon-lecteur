@@ -186,3 +186,16 @@ fieldset button { border:1px solid var(--border-subtle); border-radius:12px; pad
 .tabbar .tab.active { color:var(--accent-primary); }
 .tabbar .tab:focus { outline:none; } .tabbar .tab:focus-visible { outline:2px solid var(--accent-primary); outline-offset:-4px; }
 .tabbar .tab svg { width:22px; height:22px; }
+
+/* Connexion, erreurs, bouton d'import bien visible */
+.login { display:grid; gap:10px; margin-top:8px; }
+.err-text { color:var(--danger); font-size:.9rem; margin:0; }
+.err-text:empty { display:none; }
+#import-card { padding:0; overflow:hidden; }
+#import-card > *:not(summary) { margin:0 14px 14px; }
+.import-btn { list-style:none; cursor:pointer; display:flex; flex-direction:column; gap:2px; min-height:56px; padding:12px 16px;
+  background:var(--accent-primary); color:var(--on-accent); font-weight:700; font-size:1rem; }
+.import-btn::-webkit-details-marker { display:none; }
+.import-btn span { font-weight:500; font-size:.78rem; opacity:.85; }
+#import-card[open] > .import-btn { margin-bottom:14px; }
+.empty { text-align:center; padding:24px 12px; }

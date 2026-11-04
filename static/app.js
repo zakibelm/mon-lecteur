@@ -11,20 +11,38 @@ const st = {
 const VOICE_NAMES = { fr: { femme: "siwis", homme: "tom" }, en: { femme: "lessac", homme: "ryan" }, ar: { homme: "kareem" } };
 
 /* ---------- API ---------- */
-function askToken() {
-  const t = prompt("Jeton d'accès (API_TOKEN du serveur) :");
-  if (!t) throw new Error("Jeton requis : recharge la page.");
-  st.auth = t.trim();
-  localStorage.setItem("token", st.auth);
+// Jeton : saisi dans la page (zone « Connexion »), jamais par une fenêtre système qu'on peut fermer par erreur.
+class NeedToken extends Error {}
+function showLogin(msg) {
+  $("#login").hidden = false;
+  $("#login-msg").textContent = msg || "";
+  for (const v of document.querySelectorAll(".view")) v.hidden = true;
+  $("#login-token").focus();
 }
 async function api(path, opts = {}) {
-  if (!st.auth) askToken();
+  if (!st.auth) { showLogin(); throw new NeedToken("Jeton requis"); }
   const res = await fetch("/api" + path, {
     ...opts, headers: { ...(opts.headers || {}), Authorization: "Bearer " + st.auth },
   });
-  if (res.status === 401) { st.auth = ""; localStorage.removeItem("token"); return api(path, opts); }
+  if (res.status === 401) {
+    st.auth = ""; localStorage.removeItem("token");
+    showLogin("Jeton refusé par le serveur : vérifie-le (il a peut-être été changé).");
+    throw new NeedToken("Jeton refusé");
+  }
   return res;
 }
+$("#login").onsubmit = async (ev) => {
+  ev.preventDefault();
+  st.auth = $("#login-token").value.trim();
+  if (!st.auth) return;
+  localStorage.setItem("token", st.auth);
+  $("#login-msg").textContent = "Vérification…";
+  try {
+    await jget("/config");
+    $("#login").hidden = true; $("#login-token").value = "";
+    start();
+  } catch (e) { if (!(e instanceof NeedToken)) $("#login-msg").textContent = e.message; }
+};
 async function jget(path, opts) {
   const r = await api(path, opts);
   if (!r.ok) {
@@ -42,9 +60,11 @@ const note = (msg) => { $("#book-status").textContent = msg; };
 
 /* ---------- Navigation / thème ---------- */
 function showView(name) {
+  if (!st.auth) { showLogin(); return; }
+  $("#login").hidden = true;
   for (const v of document.querySelectorAll(".view")) v.hidden = v.id !== "view-" + name;
   for (const t of document.querySelectorAll(".tab")) t.classList.toggle("active", t.dataset.view === name);
-  if (name === "library") loadLibrary().catch((e) => ($("#upload-msg").textContent = e.message));
+  if (name === "library") loadLibrary().catch(libError);
   if (name === "settings") loadSettings().catch((e) => ($("#settings-form").textContent = e.message));
   if (name === "vocab") loadVocab().catch((e) => ($("#vocab-list").textContent = e.message));
   if (name === "chat") $("#chat-book").textContent = st.book ? `Questions sur « ${st.book.title} »` : "Ouvre d'abord un livre dans Lecture.";
@@ -95,8 +115,14 @@ function initials(t) {                          // « La ville ancienne » → V
   return (words.length ? words.slice(0, 2).map((w) => w[0]).join("") : (t.trim()[0] || "?")).toUpperCase();
 }
 
+function libError(e) {
+  if (e instanceof NeedToken) return;
+  const m = $("#lib-msg"); m.hidden = false; m.textContent = "Bibliothèque indisponible : " + e.message;
+  $("#import-card").open = true;
+}
 async function loadLibrary() {
   const books = await jget("/books");
+  $("#lib-msg").hidden = true;
   st.books = books;
   fillBookPick(books);
   clearTimeout(st.libPoll);                       // extraction ou préparation en cours : la liste se met à jour seule
@@ -189,7 +215,7 @@ function renderBooks() {
     li.append(el("div", initials(b.title), "cover"), info);
     ul.append(li);
   }
-  if (!list.length) ul.append(el("li", q ? "Aucun livre ne correspond." : "Aucun livre pour l'instant : importe-en un ci-dessus.", "muted"));
+  if (!list.length) ul.append(el("li", q ? "Aucun livre ne correspond." : "Aucun livre pour l'instant : appuie sur « ＋ Importer des documents » ci-dessus pour ajouter un PDF.", "card muted empty"));
 }
 $("#lib-search").oninput = renderBooks;
 $("#import-card > summary").addEventListener("click", () => { st.importTouched = true; });   // seul un appui de l'utilisateur compte
@@ -256,7 +282,7 @@ const mo = (n) => (n / 1048576).toFixed(n < 10485760 ? 1 : 0);
 
 /* Envoi par XMLHttpRequest : contrairement à fetch, il donne la progression de l'envoi (gros PDF). */
 function uploadWithProgress(fd, onProgress) {
-  if (!st.auth) askToken();
+  if (!st.auth) { showLogin(); return Promise.reject(new NeedToken("Jeton requis")); }
   return new Promise((resolve, reject) => {
     const x = new XMLHttpRequest();
     x.open("POST", "/api/books");
@@ -268,7 +294,8 @@ function uploadWithProgress(fd, onProgress) {
       try { d = JSON.parse(x.responseText); } catch { /* réponse non JSON (proxy) */ }
       if (x.status === 401) {
         st.auth = ""; localStorage.removeItem("token");
-        return uploadWithProgress(fd, onProgress).then(resolve, reject);
+        showLogin("Jeton refusé par le serveur : vérifie-le.");
+        return reject(new NeedToken("Jeton refusé"));
       }
       if (x.status === 413) return reject(new Error(typeof d.detail === "string" ? d.detail : "Fichier trop volumineux pour le serveur."));
       if (x.status < 200 || x.status >= 300) return reject(new Error(typeof d.detail === "string" ? d.detail : "Erreur " + x.status));
@@ -964,21 +991,31 @@ audio.onended = () => { if (!isFiller()) next(); };
 // pause imposée par le système (appel, autre app audio) : on reflète l'état au lieu de croire que ça joue encore
 audio.onpause = () => { if (st.playing && !isFiller() && !audio.ended && audio.currentTime < audio.duration) { st.playing = false; setPlayIcon(); } };
 
+async function start() {
+  for (const v of document.querySelectorAll(".view")) v.hidden = v.id !== "view-library";
+  for (const t of document.querySelectorAll(".tab")) t.classList.toggle("active", t.dataset.view === "library");
+  await init2();
+}
 (async function init() {
   applyTheme();
   if (localStorage.getItem("mono") === "1") { $("#text").classList.add("mono"); $("#btn-orig").setAttribute("aria-pressed", "false"); }
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+  if (!st.auth) { showLogin(); return; }
+  await init2();
+})();
+async function init2() {
   try {
     st.cfg = await jget("/config");
     updateFileInfo();
     $("#voice").value = st.cfg.voice || "femme";
     $("#voice").hidden = !st.cfg.server_audio;
     jget("/books").then(fillBookPick).catch(() => {});
+    $("#lang").replaceChildren();
     for (const [code, label] of Object.entries(st.cfg.upload_langs)) {
       const o = el("option", label); o.value = code; $("#lang").append(o);
     }
     $("#translate").checked = st.cfg.auto_translate;
     await loadLibrary();
   }
-  catch (e) { $("#upload-msg").textContent = e.message; }
-})();
+  catch (e) { libError(e); }
+}

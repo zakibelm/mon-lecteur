@@ -31,13 +31,23 @@
 
   <main>
     <!-- 1. Bibliothèque -->
+    <!-- Connexion : visible tant que le jeton n'est pas accepté -->
+    <form id="login" class="card login" hidden>
+      <h1 class="book-title">Connexion</h1>
+      <p class="muted">Saisis le jeton d'accès de ton serveur (API_TOKEN). Il est retenu sur cet appareil.</p>
+      <input type="password" id="login-token" class="field" placeholder="Jeton d'accès" autocomplete="current-password" required>
+      <p id="login-msg" class="err-text"></p>
+      <button type="submit" class="btn-primary">Se connecter</button>
+    </form>
+
     <section id="view-library" class="view">
+      <p id="lib-msg" class="err-text" hidden></p>
       <input type="search" id="lib-search" class="field" placeholder="Rechercher par titre…" hidden aria-label="Rechercher par titre">
       <div id="resume"></div>
       <div id="prep-cards"></div>
 
       <details id="import-card" class="card">
-        <summary class="card-title">＋ Importer des livres</summary>
+        <summary class="import-btn">＋ Importer des documents <span>PDF, PNG, JPG · plusieurs à la fois</span></summary>
         <form id="upload-form">
           <input type="file" id="file" accept=".pdf,.png,.jpg,.jpeg" multiple required aria-label="Un ou plusieurs livres">
           <p id="file-info" class="muted">Tu peux choisir plusieurs fichiers à la fois.</p>
