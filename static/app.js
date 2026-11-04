@@ -234,7 +234,7 @@ function addSegment(s) {
   p.dataset.idx = s.idx;
   if (s.page !== st.lastPage) { p.append(el("span", "Page " + s.page, "page-tag")); st.lastPage = s.page; }
   p.append(el("span", "", "t"), el("span", "", "orig"));
-  p.onclick = () => play(s.idx);
+  p.onclick = () => { unlockAudio(); play(s.idx); };
   $("#text").append(p);
   st.segs.push(s);
   paint(s.idx);
@@ -319,10 +319,18 @@ async function play(idx) {
     if (info.error) note("⚠ Traduction impossible (" + info.error + ") : lecture dans la langue d'origine");
     for (const k of [1, 2, 3]) readInfo(idx + k).catch(() => {});        // traduit les passages suivants en avance
     if (st.cfg.server_audio) {
-      const url = await audioUrl(idx);
+      const slow = setTimeout(() => { if (id === st.playId) note("Préparation de l'audio…"); }, 600);
+      const url = await audioUrl(idx).finally(() => clearTimeout(slow));
       if (id !== st.playId) return;
       audio.src = url; audio.playbackRate = st.speed;
-      await audio.play();
+      try { await audio.play(); }
+      catch (e) {
+        if (e.name !== "NotAllowedError") throw e;
+        st.playing = false; setPlayIcon(); st.unlocked = false;
+        note("Le navigateur a bloqué le son : appuie de nouveau sur ▶️ (l'audio est prêt).");
+        return;
+      }
+      if (!info.error) updateStatus();
       audioUrl(idx + 1).catch(() => {}); audioUrl(idx + 2).catch(() => {});   // préchargement
       trimCache(idx);
     } else {                                    // voix de l'appareil, aucun audio serveur
@@ -340,8 +348,20 @@ async function play(idx) {
     st.playing = false; setPlayIcon(); note(e.message);
   }
 }
+// Son muet de 0,05 s : joué PENDANT l'appui, il autorise ce lecteur audio pour la suite (Safari/iOS refuse
+// sinon un play() lancé après plusieurs secondes de traduction ou de synthèse).
+const SILENCE = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=";
+function unlockAudio() {
+  if (!st.cfg || !st.cfg.server_audio || st.unlocked) return;
+  st.unlocked = true; st.unlocking = true;
+  audio.src = SILENCE;
+  const p = audio.play();
+  const done = () => { st.unlocking = false; };
+  if (p && p.then) p.then(() => { if (audio.src === SILENCE) audio.pause(); done(); }, () => { st.unlocked = false; done(); }); else done();
+}
 function togglePlay() {
   if (!st.book) return;
+  unlockAudio();
   if (st.playing) { st.playId++; st.playing = false; stopSound(); setPlayIcon(); return; }
   if (st.cfg.server_audio && audio.src && !audio.ended && audio.currentTime > 0) {
     st.playing = true; setPlayIcon(); audio.play(); return;   // reprise exacte
@@ -428,7 +448,10 @@ $("#btn-reindex").onclick = () => reindexBook().then(() => note("Réindexation l
 
 /* ---------- Réglages ---------- */
 const PROV_LABEL = { ollama: "Ollama (local, sur le VPS)", openrouter: "OpenRouter", omniroute: "OmniRoute" };
-async function loadSettings() { st.settings = await jget("/settings"); renderSettings(); }
+async function loadSettings() {
+  st.settings = await jget("/settings"); st.models = {}; renderSettings();
+  for (const r of ["translate", "chat", "embed"]) loadModels(r, { save: false });   // listes chargées d'office
+}
 function field(label, input) {
   const l = el("label", undefined, "f");
   l.append(el("span", label), input);
@@ -486,8 +509,8 @@ function roleBlock(role, s) {
   for (const p of ["ollama", "openrouter", "omniroute"]) {
     const o = el("option", PROV_LABEL[p]); o.value = p; o.selected = p === r.provider; sel.append(o);
   }
-  const model = input(`role-${role}-model`, "text", r.model, "nom du modèle"); model.setAttribute("list", `dl-${role}`);
-  const dl = el("datalist"); dl.id = `dl-${role}`;
+  const model = el("select"); model.id = `role-${role}-model`; model.dataset.current = r.model;   // noms exacts seulement
+  model.onchange = () => setRes(role, "", true);
   const free = el("label", undefined, "check"), fcb = el("input"); fcb.type = "checkbox"; fcb.id = `role-${role}-free`; fcb.checked = !s.allow_paid;
   free.append(fcb, el("span", "Afficher seulement les modèles gratuits"));
   const res = el("div", "", "role-res"); res.id = `role-${role}-res`;
@@ -496,31 +519,53 @@ function roleBlock(role, s) {
   load.onclick = () => loadModels(role);
   test.onclick = () => testRole(role);
   fcb.onchange = () => fillModels(role);
-  sel.onchange = () => { st.models[role] = null; dl.replaceChildren(); };
+  sel.onchange = () => { st.models[role] = null; loadModels(role); };   // nouvelle liste pour ce fournisseur
   const row = el("div", undefined, "row"); row.append(load, test);
-  box.append(field("Fournisseur", sel), field("Modèle", model), dl, free, row, res);
+  box.append(field("Fournisseur", sel), field("Modèle", model), free, row, res);
+  fillModels(role);
   return box;
 }
-function fillModels(role) {
-  const dl = $(`#dl-${role}`), list = st.models[role] || [], onlyFree = $(`#role-${role}-free`).checked;
-  dl.replaceChildren();
-  for (const m of list) {
-    if (onlyFree && m.free === false) continue;
-    const o = el("option"); o.value = m.id; o.label = (m.free ? "🆓 " : "") + m.id; dl.append(o);
+function fillModels(role) {     // liste déroulante : uniquement les noms renvoyés par le fournisseur
+  const sel = $(`#role-${role}-model`);
+  if (!sel) return;
+  const cur = sel.value || sel.dataset.current || "", list = st.models[role], onlyFree = $(`#role-${role}-free`).checked;
+  sel.replaceChildren();
+  if (!list) {                  // pas encore chargée : on montre le choix actuel tel quel
+    const o = el("option", cur ? `${cur} (actuel)` : "— aucun modèle —"); o.value = cur; sel.append(o);
+    const h = el("option", "Charge la liste pour en choisir un autre"); h.disabled = true; sel.append(h);
+    return;
+  }
+  const shown = list.filter((m) => !(onlyFree && m.free === false));
+  if (cur && !list.some((m) => m.id === cur || m.id === cur + ":latest")) {
+    const o = el("option", `⚠ ${cur} — introuvable chez ce fournisseur : choisis dans la liste`); o.value = cur; sel.append(o);
+  } else if (!cur) {
+    const o = el("option", "— choisis un modèle —"); o.value = ""; sel.append(o);
+  }
+  for (const m of shown) {
+    const o = el("option", (m.free ? "🆓 " : m.free === false ? "💳 " : "") + m.id); o.value = m.id; sel.append(o);
+  }
+  const want = list.some((m) => m.id === cur) ? cur : list.some((m) => m.id === cur + ":latest") ? cur + ":latest" : cur;
+  sel.value = want;
+  if (sel.value !== want) {     // le modèle actuel est payant et masqué par le filtre : on le garde visible
+    const o = el("option", "💳 " + want); o.value = want; sel.prepend(o); sel.value = want;
   }
 }
 function setRes(role, text, ok) {
   const r = $(`#role-${role}-res`); r.textContent = text; r.className = "role-res " + (ok ? "ok" : "err");
 }
-async function loadModels(role) {
-  setRes(role, "Enregistrement puis chargement…", true);
+async function loadModels(role, { save = true } = {}) {
+  setRes(role, "Chargement de la liste…", true);
   try {
-    if (!(await saveSettings(true))) return setRes(role, "Corrige d'abord les réglages ci-dessus.", false);
+    // n'enregistre que les URL et clés (pas encore le modèle : il peut ne pas exister chez le nouveau fournisseur)
+    if (save && !(await saveSettings(true, { roles: false }))) return setRes(role, "Corrige d'abord les réglages ci-dessus.", false);
     const prov = $(`#role-${role}-prov`).value;
     st.models[role] = (await jget("/llm/models?provider=" + prov)).models;
     fillModels(role);
-    setRes(role, `${st.models[role].length} modèles chargés : clique dans le champ Modèle pour les voir.`, true);
-  } catch (e) { setRes(role, e.message, false); }
+    const cur = $(`#role-${role}-model`).value;
+    const ok = st.models[role].some((m) => m.id === cur);
+    setRes(role, `${st.models[role].length} modèles chargés.` + (ok ? " Choisis dans la liste « Modèle »." :
+      " ⚠ Le modèle actuel n'y figure pas : choisis-en un dans la liste, puis Enregistrer."), ok);
+  } catch (e) { setRes(role, "Liste indisponible : " + e.message, false); }
 }
 async function testRole(role) {
   setRes(role, "Enregistrement puis test en cours…", true);
@@ -535,14 +580,16 @@ function keyPatch(id) {
   const v = $(id).value.trim();
   return v ? { api_key: v } : {};
 }
-async function saveSettings(quiet) {
+async function saveSettings(quiet, { roles: withRoles = true } = {}) {
   const msg = $("#settings-msg");
   if ($("#set-paid").checked && !st.settings.allow_paid && !confirm("Les modèles payants peuvent être facturés sur ton compte. Activer quand même ?")) {
     $("#set-paid").checked = false; return false;
   }
-  const roles = {};
-  for (const r of ["translate", "chat", "embed"])
-    roles[r] = { provider: $(`#role-${r}-prov`).value, model: $(`#role-${r}-model`).value.trim() };
+  const roles = {}, keepProv = {};
+  for (const r of ["translate", "chat", "embed"]) {
+    keepProv[r] = { prov: $(`#role-${r}-prov`).value, model: $(`#role-${r}-model`).value };
+    if (withRoles) roles[r] = { provider: keepProv[r].prov, model: keepProv[r].model.trim() };
+  }
   const patch = {
     allow_paid: $("#set-paid").checked, auto_translate: $("#set-auto").checked,
     providers: {
@@ -550,13 +597,14 @@ async function saveSettings(quiet) {
       openrouter: keyPatch("#set-or-key"),
       omniroute: { base_url: $("#set-om-url").value.trim(), ...keyPatch("#set-om-key") },
     },
-    roles,
+    ...(withRoles ? { roles } : {}),
   };
   try {
     st.settings = await jpost("/settings", patch, "PUT");
-    const keep = { ...st.models };
-    renderSettings(); st.models = keep;
-    for (const r of ["translate", "chat", "embed"]) if (st.models[r]) fillModels(r);
+    if (!withRoles)             // choix en cours (pas encore enregistrés) conservés à l'écran
+      for (const r of ["translate", "chat", "embed"]) st.settings.roles[r] = { provider: keepProv[r].prov, model: keepProv[r].model };
+    renderSettings();
+    for (const r of ["translate", "chat", "embed"]) fillModels(r);
     $("#settings-msg").textContent = quiet ? "" : "✔ Enregistré";
     if (st.cfg) st.cfg.auto_translate = st.settings.auto_translate;
     return true;
@@ -567,8 +615,8 @@ $("#settings-form").onsubmit = (ev) => { ev.preventDefault(); saveSettings(false
 /* ---------- Câblage ---------- */
 for (const t of document.querySelectorAll(".tab")) t.onclick = () => showView(t.dataset.view);
 $("#btn-play").onclick = togglePlay;
-$("#btn-next").onclick = next;
-$("#btn-prev").onclick = prev;
+$("#btn-next").onclick = () => { unlockAudio(); next(); };
+$("#btn-prev").onclick = () => { unlockAudio(); prev(); };
 $("#speed").onchange = (e) => {
   st.speed = parseFloat(e.target.value); audio.playbackRate = st.speed;
   if (st.playing && !st.cfg.server_audio) play(st.cur);       // le débit vocal ne change pas en cours de phrase
@@ -578,7 +626,7 @@ $("#btn-theme").onclick = () => {
   const dark = !document.documentElement.classList.contains("dark");
   localStorage.setItem("dark", dark ? "1" : "0"); applyTheme();
 };
-audio.onended = () => next();
+audio.onended = () => { if (!st.unlocking && audio.src !== SILENCE) next(); };
 
 (async function init() {
   applyTheme();

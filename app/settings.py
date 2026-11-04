@@ -5,6 +5,7 @@
 """
 import base64
 import copy
+import difflib
 import hashlib
 import json
 import threading
@@ -169,6 +170,28 @@ def embed_signature() -> str:
     return f"{r['provider']}:{r['model']}"
 
 
+# ---------- nom de modèle exact ----------
+VERIFIED_LISTS = ("ollama", "openrouter")      # listes complètes ; OmniRoute peut avoir des routes non listées
+
+
+def _check_model_exists(s: dict, role: str, r: dict) -> None:
+    """Refuse un nom inconnu du fournisseur (avec suggestions). Fournisseur injoignable : pas de vérification
+    possible, le nom est accepté (le bouton « Tester » le dira)."""
+    if r["provider"] not in VERIFIED_LISTS or not r["model"]:
+        return
+    try:
+        ids = set(_price_map(r["provider"], _client(s, r["provider"])))
+    except LLMError:
+        return
+    m = r["model"]
+    if m in ids or (r["provider"] == "ollama" and f"{m}:latest" in ids):
+        return
+    by_lower = {i.lower(): i for i in ids}
+    near = [by_lower[x] for x in difflib.get_close_matches(m.lower(), list(by_lower), n=3, cutoff=0.6)]
+    hint = f" Voulais-tu dire : {', '.join(near)} ?" if near else " Charge la liste des modèles et choisis-en un."
+    raise ValueError(f"Modèle « {m} » introuvable chez {r['provider']} pour « {ROLE_LABELS[role]} ».{hint}")
+
+
 # ---------- mise à jour validée ----------
 def update(patch: dict) -> dict:
     with _lock:
@@ -202,6 +225,8 @@ def update(patch: dict) -> dict:
             if new != s["roles"][role]:
                 changed.append((role, new))
             s["roles"][role] = new
+        for role, r in changed:                       # nom exact : une faute de frappe ne passe pas
+            _check_model_exists(s, role, r)
         # garde-fou gratuit/payant, vérifié sur les rôles modifiés (ou si on vient de retirer l'autorisation)
         to_check = changed if "allow_paid" not in patch else [(r, s["roles"][r]) for r in ROLES]
         if not s["allow_paid"]:

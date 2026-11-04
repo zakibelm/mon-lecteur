@@ -44,7 +44,8 @@ class FakeLLM(http.server.BaseHTTPRequestHandler):
                     {"id": "meta/gratuit-sans-suffixe", "pricing": {"prompt": "0", "completion": "0"}},
                     {"id": "openai/gpt-4o", "pricing": {"prompt": "0.0000025", "completion": "0.00001"}}]})
             else:
-                self._send({"data": [{"id": "qwen2.5:7b"}, {"id": "bge-m3"}]})
+                self._send({"data": [{"id": "qwen2.5:7b"}, {"id": "bge-m3"}, {"id": "llama3.2:latest"}, {"id": "llama3.2:3b"},
+                                     {"id": "autre-embed"}]})
         else:
             self._send({}, 404)
 
@@ -387,6 +388,17 @@ def v22_tests(c):
     c.post(f"/api/books/{en}/retranslate", headers=H, json={"idx": 0})
     assert c.get(f"/api/books/{en}/segments/0/read", headers=H).json()["text"].startswith("FR: ")
     print("✔ bascule OmniRoute ↔ Ollama local sans redémarrage")
+
+    # --- nom de modèle exact : faute de frappe refusée avec suggestion, rien n'est enregistré ---
+    before = c.get("/api/settings", headers=H).json()["roles"]
+    r = c.put("/api/settings", headers=H, json={"roles": {"translate": {"provider": "ollama", "model": "qwen2.5:7B"}}})
+    assert r.status_code == 400 and "introuvable" in r.json()["detail"] and "qwen2.5:7b" in r.json()["detail"], r.text
+    r = c.put("/api/settings", headers=H, json={"roles": {"chat": {"provider": "openrouter", "model": "qwen/qwen-2.5-72b:free"}}})
+    assert r.status_code == 400 and "qwen/qwen-2.5-72b-instruct:free" in r.json()["detail"], r.text
+    assert c.get("/api/settings", headers=H).json()["roles"] == before, "un refus ne doit rien enregistrer"
+    assert c.put("/api/settings", headers=H, json={"roles": {"chat": {"provider": "ollama", "model": "llama3.2"}}}).status_code == 200
+    rr = c.put("/api/settings", headers=H, json={"roles": before}); assert rr.status_code == 200, (before, rr.text)
+    print("✔ nom de modèle exact : faute de frappe refusée avec suggestion (Ollama, OpenRouter), « :latest » implicite")
 
     # --- échec de traduction : repli sur l'original avec message clair ---
     bad = upload(c, pdf_native("FAIL FAIL FAIL FAIL FAIL FAIL", "helv"), "fail.pdf", lang="en")
