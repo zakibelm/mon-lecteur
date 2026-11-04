@@ -22,6 +22,7 @@ ok()   { printf '✔ %s\n' "$*"; }
 fail() { printf '✖ %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || fail "Lance avec sudo."
 [ -f "$APP/.env" ] || fail "$APP/.env introuvable : le Lecteur n'est pas installé ici."
+[[ "$MAX_MB" =~ ^[0-9]+$ ]] && [ "$MAX_MB" -ge 1 ] && [ "$MAX_MB" -le 10240 ] || fail "MAX_MB doit être un nombre de Mo entre 1 et 10240."
 
 echo "--- 1. Code"
 SRC="/root/lecteur-src-$STAMP"
@@ -80,7 +81,8 @@ open(path, "w").write(s)
 PY
 if ! nginx -t 2>/tmp/nginx-maj.log; then
   cat /tmp/nginx-maj.log; cp -a "$BAK" "$CONF"
-  fail "nginx -t refuse la modification : fichier remis à l'identique, nginx NON rechargé."
+  cp -a "$APP/.env.avant-$STAMP" "$APP/.env"; systemctl restart lecteur     # app et nginx restent cohérents
+  fail "nginx -t refuse la modification : fichier nginx et .env remis à l'identique, nginx NON rechargé."
 fi
 systemctl reload nginx
 ok "nginx -t valide, rechargé ; dans $CONF :"
