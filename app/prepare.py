@@ -9,9 +9,10 @@ passe toujours en premier.
 import hashlib
 import logging
 import threading
+import time
 from pathlib import Path
 
-from . import config, reading, settings, tts
+from . import config, rag, reading, settings, tts
 from .db import db
 
 log = logging.getLogger("prepare")
@@ -59,6 +60,8 @@ class Preparer:
         self.errors: dict[str, str] = {}
         self._thread: threading.Thread | None = None
         self.enabled = True                         # tests : désactivé pour garder des comptages déterministes
+        self.current: tuple[str, int, float] | None = None   # (livre, passage, début) : ce qui tourne maintenant
+        self.paused_for = ""                         # livre dont l'indexation passe avant la préparation
 
     def _start(self):
         if not self._thread or not self._thread.is_alive():
@@ -101,6 +104,12 @@ class Preparer:
     def _next(self):
         with self._cv:
             while True:
+                # la discussion d'abord : pendant une indexation, Ollama est saturé (mesuré : 350 → 10 passages/min)
+                if rag._running and any(j[0] < j[1] for j in self._jobs.values()):
+                    self.paused_for = next(iter(rag._running), "")
+                    self._cv.wait(timeout=2)
+                    continue
+                self.paused_for = ""
                 for b in self._order:
                     job = self._jobs.get(b)
                     if job and job[0] < job[1]:
@@ -114,6 +123,7 @@ class Preparer:
     def _run(self):
         while True:
             book_id, idx = self._next()
+            self.current = (book_id, idx, time.time())
             try:
                 with db() as c:
                     book = c.execute("SELECT status FROM books WHERE id=?", (book_id,)).fetchone()
@@ -129,6 +139,8 @@ class Preparer:
             except Exception as e:  # noqa: BLE001 — la préparation ne doit jamais tuer le serveur
                 log.warning("Préparation impossible (%s #%s) : %s", book_id, idx, e)
                 self.errors[book_id] = str(e)[:200]; self.stop(book_id)
+            finally:
+                self.current = None
 
 
 preparer = Preparer()
@@ -145,5 +157,13 @@ def status(book_id: str) -> dict:
     server_audio = tts.get_provider().server_audio
     ready = sum(1 for s in segs if (not reading.needs_translation(book, s) or s["tr"])
                 and (not server_audio or s["idx"] in with_audio))
-    return {"ready": ready, "total": len(segs), "running": preparer.busy(book_id),
-            "whole": book_id in preparer.whole, "error": preparer.errors.get(book_id, "")}
+    cur = preparer.current
+    out = {"ready": ready, "total": len(segs), "running": preparer.busy(book_id),
+           "whole": book_id in preparer.whole, "error": preparer.errors.get(book_id, ""),
+           "current": None, "paused": ""}
+    if cur and cur[0] == book_id:
+        out["current"] = {"idx": cur[1], "seconds": int(time.time() - cur[2])}
+    if preparer.paused_for and out["running"]:
+        done, total = rag.progress(preparer.paused_for)
+        out["paused"] = f"indexation de la discussion en cours ({done}/{total}), la préparation reprend ensuite"
+    return out

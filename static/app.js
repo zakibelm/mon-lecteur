@@ -222,7 +222,8 @@ function showPrep(p) {
   const pct = p.total ? Math.floor((100 * p.ready) / p.total) : 0;
   $("#btn-prep").textContent = p.running && p.whole ? "⏹ Arrêter la préparation" : "⚡ Préparer tout le livre à l'avance";
   $("#prep-msg").textContent = `Prêt à l'écoute sans attente : ${p.ready}/${p.total} passages (${pct} %)`
-    + (p.running ? (p.whole ? " — préparation en cours, même écran éteint ou app fermée" : " — les suivants se préparent") : "")
+    + (p.paused ? ` — en pause : ${p.paused}` : p.current ? ` — passage ${p.current.idx + 1} en cours depuis ${p.current.seconds} s`
+       : p.running ? (p.whole ? " — préparation en cours, même écran éteint ou app fermée" : " — les suivants se préparent") : "")
     + (p.error ? ` — arrêtée : ${p.error}` : "");
   clearTimeout(st.prepPoll);
   if (p.running && st.book && !$("#view-reader").hidden)

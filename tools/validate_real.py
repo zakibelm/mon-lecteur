@@ -8,6 +8,7 @@ Usage (depuis /opt/lecteur, avec le venv du projet) :
   venv/bin/python tools/validate_real.py fr                    # 6b  PDF natif français + audio + chat RAG
   venv/bin/python tools/validate_real.py cjk                   # 6c  3 PDF natifs + 3 PDF scannés zh/ja/ko
   venv/bin/python tools/validate_real.py bench [--omni-model M]  # 6d  qwen2.5:7b (Ollama) vs OmniRoute
+  venv/bin/python tools/validate_real.py lot [ID|auto] [N]     # mesure : groupes de traduction 1 / 3 / 8
   venv/bin/python tools/validate_real.py snapshot FICHIER      # 6g  état avant redémarrage
   venv/bin/python tools/validate_real.py compare FICHIER       # 6g  comparaison après redémarrage
 Variables : LECTEUR_URL (défaut http://127.0.0.1:<APP_PORT du .env>), API_TOKEN (sinon lu dans .env),
@@ -40,6 +41,8 @@ def _env_file() -> dict:
 
 
 ENV = {**_env_file(), **{k: v for k, v in os.environ.items() if k in ("API_TOKEN", "PIPER_CMD")}}
+for _k, _v in ENV.items():          # les modules de l'app (importés plus bas) lisent leur configuration ici
+    os.environ.setdefault(_k, _v)
 URL = os.getenv("LECTEUR_URL", f"http://127.0.0.1:{ENV.get('APP_PORT') or 8000}").rstrip("/")
 TOKEN = ENV.get("API_TOKEN", "")
 H = {"Authorization": f"Bearer {TOKEN}"}
@@ -290,6 +293,55 @@ def cmd_bench(args: list[str]) -> int:
     return 0
 
 
+# ---------- mesure : taille des groupes de traduction ----------
+def cmd_lot(args: list[str]) -> int:
+    """Chronomètre la traduction des MÊMES passages d'un livre avec des groupes de 1, 3 et 8 (rien n'est
+    enregistré). À lancer préparation arrêtée, pour ne pas partager le processeur."""
+    from app import translate as tr
+    from app.db import db
+    n = int(args[1]) if len(args) > 1 else 24
+    with db() as c:
+        if args and args[0] != "auto":
+            book = c.execute("SELECT * FROM books WHERE id=?", (args[0],)).fetchone()
+        else:
+            book = c.execute("SELECT * FROM books WHERE translate=1 AND lang!='fr' AND status='ready' "
+                             "ORDER BY created_at DESC").fetchone()
+        if not book:
+            print("Aucun livre à traduire trouvé (donne son identifiant)."); return 2
+        segs = c.execute("SELECT idx, text, lang FROM segments WHERE book_id=? AND idx>=? AND lang NOT IN ('fr','und') "
+                         "ORDER BY idx LIMIT ?", (book["id"], book["progress_idx"], n)).fetchall()
+    print(f"Livre « {book['title']} » ({book['id']}), {len(segs)} passages à partir du n° {segs[0]['idx'] + 1}, "
+          f"{sum(len(x['text']) for x in segs)} caractères ; modèle : {tr.settings.load()['roles']['translate']}")
+    old = tr.BATCH_TIMEOUT
+    tr.BATCH_TIMEOUT = 600                       # pour mesurer le vrai temps (l'app coupe à 90 s)
+    rows = []
+    try:
+        for size in (1, 3, 8):
+            t0, calls, slow, fails, worst = time.time(), 0, 0, 0, 0.0
+            for i in range(0, len(segs), size):
+                part = segs[i:i + size]
+                t1 = time.time()
+                try:
+                    if size == 1:
+                        tr.translate(part[0]["text"], part[0]["lang"])
+                    else:
+                        tr.translate_batch([x["text"] for x in part], part[0]["lang"])
+                except Exception as e:  # noqa: BLE001 — on compte et on continue
+                    fails += 1; print(f"   groupe de {size} n° {i // size + 1} : échec ({str(e)[:80]})")
+                dt = time.time() - t1; calls += 1; worst = max(worst, dt); slow += dt > 90
+                print(f"   groupe de {size}, appel {calls} : {dt:.1f} s", flush=True)
+            total = time.time() - t0
+            rows.append((size, calls, total, total / len(segs), worst, slow, fails))
+    finally:
+        tr.BATCH_TIMEOUT = old
+    print("\n| Groupe | Appels | Durée totale | s / passage | Appel le plus long | > 90 s | Échecs |\n|---|---|---|---|---|---|---|")
+    for size, calls, total, per, worst, slow, fails in rows:
+        print(f"| {size} | {calls} | {total:.0f} s | {per:.1f} | {worst:.0f} s | {slow} | {fails} |")
+    best = min(rows, key=lambda r: (r[6], r[5], r[3]))
+    print(f"\nLe plus rapide sans échec ni dépassement : groupes de {best[0]} → mets TRANSLATE_BATCH={best[0]} dans .env")
+    return 0
+
+
 # ---------- 6g : persistance ----------
 def _state() -> dict:
     books = api("GET", "/api/books").json()
@@ -344,6 +396,8 @@ def main() -> int:
         return cmd_cjk()
     if cmd == "bench":
         return cmd_bench(rest)
+    if cmd == "lot":
+        return cmd_lot(rest)
     if cmd == "snapshot":
         return cmd_snapshot(rest[0])
     if cmd == "compare":

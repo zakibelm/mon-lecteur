@@ -1,4 +1,5 @@
 """Traduction d'un segment vers le français via le modèle choisi dans Réglages."""
+import os
 import re
 
 from . import settings
@@ -45,6 +46,14 @@ def translate(text: str, src_lang: str, prev: tuple[str, str] | None = None) -> 
 
 
 _MARK = re.compile(r"\[(\d+)\]")
+BATCH_TIMEOUT = float(os.getenv("TRANSLATE_BATCH_TIMEOUT", "90"))   # au-delà : passage par passage
+
+
+def _max_tokens(texts: list[str]) -> int:
+    """Plafond de réponse : ~3 jetons par caractère source CJK, ~1 par caractère sinon (le français est plus long)."""
+    n = sum(len(t) for t in texts)
+    cjk = sum(1 for t in texts for ch in t if "\u2e80" <= ch <= "\u9fff" or "\uac00" <= ch <= "\ud7af")
+    return int(64 + 3 * cjk + 1.0 * (n - cjk))
 
 
 def translate_batch(texts: list[str], src_lang: str, prev: tuple[str, str] | None = None) -> tuple[list[str], str]:
@@ -59,7 +68,9 @@ def translate_batch(texts: list[str], src_lang: str, prev: tuple[str, str] | Non
              "ses numéros [1], [2]… en début de ligne, un passage par numéro, rien d'autre.\n\nTexte à traduire :\n")
     user += "\n".join(f"[{i + 1}] {t}" for i, t in enumerate(texts))
     raw = _THINK.sub("", client.chat(model, [{"role": "system", "content": SYSTEM},
-                                              {"role": "user", "content": user}], temperature=0.1, timeout=420))
+                                              {"role": "user", "content": user}], temperature=0.1,
+                                  timeout=BATCH_TIMEOUT, max_tokens=_max_tokens(texts),
+                                  retries=0))        # jamais relancé : le passage par passage prend le relais
     parts = _MARK.split(raw)                       # ['avant', '1', 'texte 1', '2', 'texte 2', …]
     found = {int(parts[i]): clean_output(parts[i + 1]) for i in range(1, len(parts) - 1, 2)}
     out = [found.get(i + 1, "") for i in range(len(texts))]

@@ -1,5 +1,5 @@
 // Service worker : met en cache la coquille de l'app (jamais l'API) pour un démarrage instantané.
-const CACHE = "lecteur-v8";   // changer à chaque mise à jour de la coquille (index/app.js/style)
+const CACHE = "lecteur-v9";   // changer à chaque mise à jour de la coquille (index/app.js/style)
 const SHELL = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest", "icon-192.png", "icon-512.png"];
 
 self.addEventListener("install", (e) => {

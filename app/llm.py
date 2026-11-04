@@ -54,6 +54,8 @@ class Client:
                 last = e
                 if isinstance(e, httpx.HTTPStatusError) and e.response.status_code not in (429, 500, 502, 503, 504):
                     break
+                if isinstance(e, httpx.TimeoutException):
+                    break          # un modèle trop lent le restera : relancer ne fait que bloquer (mesuré : 3 × 7 min)
                 if attempt < retries:
                     time.sleep(1.5 * (attempt + 1))
         raise LLMError(_explain(last)) from last
@@ -76,9 +78,12 @@ class Client:
             out.append({"id": mid, "free": free})
         return sorted(out, key=lambda m: m["id"])
 
-    def chat(self, model: str, messages: list[dict], temperature: float = 0.2, timeout: float = 180) -> str:
-        r = self._request("POST", "/chat/completions", timeout=timeout,
-                          json={"model": model, "messages": messages, "temperature": temperature})
+    def chat(self, model: str, messages: list[dict], temperature: float = 0.2, timeout: float = 180,
+             max_tokens: int | None = None, retries: int = 2) -> str:
+        body = {"model": model, "messages": messages, "temperature": temperature}
+        if max_tokens:
+            body["max_tokens"] = max_tokens
+        r = self._request("POST", "/chat/completions", timeout=timeout, retries=retries, json=body)
         try:
             return r.json()["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, ValueError) as e:

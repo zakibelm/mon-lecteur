@@ -21,8 +21,9 @@ TOKEN = "Tk9pQ2fL8vB1nZ4yW7sR0eA5uH3jD6mXq"      # >= 32 caractères (exigé par
 
 # ---------- LLM simulé (API compatible OpenAI) ----------
 TR_CALLS: list[tuple[str, str]] = []          # (fournisseur, texte) pour chaque traduction demandée
-AUTH_SEEN: list[tuple[str, str]] = []
-EMB_TEXTS: list[str] = []                    # textes envoyés au modèle d'embeddings         # (préfixe de chemin, en-tête Authorization)
+AUTH_SEEN: list[tuple[str, str]] = []         # (préfixe de chemin, en-tête Authorization)
+EMB_TEXTS: list[str] = []                    # textes envoyés au modèle d'embeddings
+BATCH_BODIES: list[dict] = []                # corps des appels de traduction groupée
 
 
 def _tag(path: str) -> str:
@@ -71,7 +72,10 @@ class FakeLLM(http.server.BaseHTTPRequestHandler):
             if text.startswith("FAIL"):
                 return self._send({"error": "boom"}, 429)
             if text.startswith("[1] "):                              # appel groupé (un paragraphe)
-                TR_CALLS.append((_tag(self.path), text))
+                TR_CALLS.append((_tag(self.path), text)); BATCH_BODIES.append(body)
+                if os.environ.get("BATCH_SLOW"):
+                    threading.Event().wait(float(os.environ["BATCH_SLOW"]))   # time.sleep est neutralisé plus bas
+                    return
                 if os.environ.get("BATCH_BAD"):
                     return self._send({"choices": [{"message": {"content": "FR: tout mélangé sans numéros"}}]})
                 blocks = re.split(r"\[(\d+)\] ", text)[1:]
@@ -82,7 +86,7 @@ class FakeLLM(http.server.BaseHTTPRequestHandler):
         self._send({"choices": [{"message": {"content": "Réponse simulée"}}]})
 
 
-srv = http.server.HTTPServer(("127.0.0.1", 0), FakeLLM)
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeLLM)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 
 # ---------- Piper simulé : écrit 0,5 s de silence en WAV ----------
@@ -113,13 +117,17 @@ from PIL import Image, ImageDraw, ImageFont  # noqa: E402
 from app import config, detect, extract, llm, settings, translate  # noqa: E402
 from app import db as database  # noqa: E402
 from app.main import app  # noqa: E402
-from app import prepare  # noqa: E402
+from app import prepare, reading  # noqa: E402
 
 prepare.preparer.enabled = False      # préparation en avance testée à part (comptages déterministes ailleurs)
 
 langs = subprocess.run(["tesseract", "--list-langs"], capture_output=True, text=True).stdout
 extract.OCR_LANG = "eng"        # le test OCR est en anglais ; en prod : fra+eng(+ara)
 llm.time.sleep = lambda s: None     # pas d'attente réelle entre les nouvelles tentatives
+
+
+def _pause(sec: float) -> None:     # vraie attente pour les tests (time.sleep est neutralisé ci-dessus)
+    threading.Event().wait(sec)
 H = {"Authorization": f"Bearer {TOKEN}"}
 ZH = "今年公司的销量增长了三十五万台，明年计划继续扩大产能。"
 EN = "The quick brown fox jumps over the lazy dog near the river bank every single morning."
@@ -501,10 +509,13 @@ def v22_tests(c):
     r0 = c.get(f"/api/books/{gid}/segments/0/read", headers=H).json()
     assert r0["translated"] and r0["text"] == f"FR: {zh5[0]}", r0
     assert len(TR_CALLS) == n0 + 1, f"{len(TR_CALLS) - n0} appels au lieu d'1"
+    assert reading.BATCH_MAX == 3 and TR_CALLS[-1][1].count("[") == 3, "groupes de 3 passages par défaut"
+    mt = BATCH_BODIES[-1].get("max_tokens")
+    assert mt and mt < 400, f"plafond de réponse absent ou trop haut : {mt}"
     for i in range(1, 5):
         ri = c.get(f"/api/books/{gid}/segments/{i}/read", headers=H).json()
         assert ri["translated"] and ri["text"] == f"FR: {zh5[i]}", ri
-    assert len(TR_CALLS) == n0 + 1, "les passages suivants étaient déjà traduits par l'appel groupé"
+    assert len(TR_CALLS) == n0 + 2, f"5 passages par groupes de 3 = 2 appels, vu {len(TR_CALLS) - n0}"
     # réponse mal numérotée : retour au passage par passage, rien n'est perdu
     c.post(f"/api/books/{gid}/retranslate", headers=H, json={})
     os.environ["BATCH_BAD"] = "1"
@@ -512,7 +523,26 @@ def v22_tests(c):
     r0 = c.get(f"/api/books/{gid}/segments/0/read", headers=H).json()
     del os.environ["BATCH_BAD"]
     assert r0["translated"] and r0["text"] == f"FR: {zh5[0]}" and len(TR_CALLS) == n0 + 2, (r0, len(TR_CALLS) - n0)
-    print("✔ traduction par paragraphe : 5 passages en 1 appel ; réponse mal numérotée → passage par passage")
+    reading._no_batch.clear()
+    # groupe trop lent : UN seul essai (pas de relance), retour immédiat au passage par passage, plus de groupe ensuite
+    c.post(f"/api/books/{gid}/retranslate", headers=H, json={})
+    from app import translate as tr_mod
+    old_to = tr_mod.BATCH_TIMEOUT; tr_mod.BATCH_TIMEOUT = 1.0
+    os.environ["BATCH_SLOW"] = "3"
+    import time as _t
+    n0, nb = len(TR_CALLS), len(BATCH_BODIES); t0 = _t.time()
+    try:
+        r0 = c.get(f"/api/books/{gid}/segments/0/read", headers=H).json()
+        el = _t.time() - t0
+        assert r0["translated"] and r0["text"] == f"FR: {zh5[0]}", r0
+        assert len(BATCH_BODIES) == nb + 1, f"{len(BATCH_BODIES) - nb} essais groupés : un appel groupé n'est jamais relancé"
+        assert el < 2.5, f"{el:.1f} s : le délai du groupe (1 s) doit couper court"
+        r1 = c.get(f"/api/books/{gid}/segments/1/read", headers=H).json()
+        assert r1["translated"] and len(BATCH_BODIES) == nb + 1, "après un échec, ce livre ne tente plus de groupe"
+    finally:
+        tr_mod.BATCH_TIMEOUT = old_to; del os.environ["BATCH_SLOW"]; reading._no_batch.clear()
+    print(f"✔ traduction par paragraphe : groupes de 3 (plafond {mt} jetons), mal numéroté ou trop lent "
+          f"({el:.1f} s, sans relance) → passage par passage")
 
     # --- préparation en avance (traduction + audio) côté serveur ---
     import time as _t
@@ -525,9 +555,26 @@ def v22_tests(c):
             st_ = c.get(f"/api/books/{gid}/prepare", headers=H).json()
             if st_["ready"] == st_["total"] and not st_["running"]:
                 break
-            _t.sleep(0.1)
+            _pause(0.1)
         assert st_["ready"] == st_["total"] == 5, st_
         print("✔ préparation en avance : le serveur traduit et fabrique l'audio des passages suivants tout seul")
+        # pendant une indexation, la préparation attend (Ollama partagé) puis reprend seule
+        c.post(f"/api/books/{gid}/retranslate", headers=H, json={})
+        rag._running.add(big)
+        try:
+            c.post(f"/api/books/{gid}/prepare", headers=H, json={})
+            _pause(1.5)
+            st_ = c.get(f"/api/books/{gid}/prepare", headers=H).json()
+            assert st_["paused"].startswith("indexation") and st_["ready"] == 0, st_
+        finally:
+            rag._running.discard(big)
+        for _ in range(150):                          # reprise ≤ 2 s après la fin de l'indexation
+            st_ = c.get(f"/api/books/{gid}/prepare", headers=H).json()
+            if st_["ready"] == 5:
+                break
+            _pause(0.1)
+        assert st_["ready"] == 5 and not st_["paused"], st_
+        print("✔ priorité à la discussion : préparation en pause pendant l'indexation, reprise seule ensuite")
         # « Préparer tout le livre » sur le gros livre, depuis la position de lecture, puis arrêt
         tot = rag.progress(big)[1]
         r = c.post(f"/api/books/{big}/prepare", headers=H, json={}).json()
@@ -536,7 +583,7 @@ def v22_tests(c):
             st_ = c.get(f"/api/books/{big}/prepare", headers=H).json()
             if st_["ready"] == tot:
                 break
-            _t.sleep(0.1)
+            _pause(0.1)
         assert st_["ready"] == tot and not st_["error"], st_
         r = c.post(f"/api/books/{big}/prepare", headers=H, json={"stop": True}).json()
         assert not r["running"], r

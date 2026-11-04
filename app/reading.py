@@ -1,5 +1,6 @@
 """Texte « à lire » d'un segment : original ou traduction française (mise en cache en base)."""
 import logging
+import os
 import re
 import threading
 
@@ -26,13 +27,16 @@ def _cached(c, book_id: str, idx: int):
                      (book_id, idx)).fetchone()
 
 
-BATCH_MAX = 8                       # passages par appel groupé
+BATCH_MAX = int(os.getenv("TRANSLATE_BATCH", "3"))   # passages par appel groupé (1 = jamais groupé)
+_no_batch: set[str] = set()         # livres où un appel groupé a échoué : passage par passage ensuite
 BATCH_CHARS = {"cjk": 350, "autre": 900}   # taille max du texte source d'un appel (sortie ≈ 1,5×, CPU lent)
 
 
 def _translate_group(book, seg, prev) -> bool:
     """Traduit d'un coup le passage demandé ET les suivants du même paragraphe (même langue, non traduits).
     Retourne True si au moins le passage demandé a été traduit. Appelé sous _lock."""
+    if BATCH_MAX < 2 or book["id"] in _no_batch:
+        return False
     lang = seg["lang"]
     limit = BATCH_CHARS["cjk" if lang in ("zh", "ja", "ko") else "autre"]
     with db() as c:
@@ -50,8 +54,9 @@ def _translate_group(book, seg, prev) -> bool:
         return False                                     # un seul passage : traduction classique
     try:
         outs, label = tr.translate_batch([r["text"] for r in group], lang, prev)
-    except ValueError as e:                              # numérotation ratée : passage par passage
-        log.info("Traduction groupée abandonnée (%s #%s) : %s", book["id"], seg["idx"], e)
+    except (ValueError, LLMError) as e:                  # mal numéroté, trop lent, panne : passage par passage
+        log.warning("Traduction groupée abandonnée pour ce livre (%s #%s) : %s", book["id"], seg["idx"], e)
+        _no_batch.add(book["id"])
         return False
     with db() as c:
         c.executemany("INSERT OR REPLACE INTO translations VALUES(?,?,?,?)",
