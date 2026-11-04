@@ -77,6 +77,13 @@ function applyTheme() {                    // choix enregistré, sinon réglage 
   const dark = saved === null ? matchMedia("(prefers-color-scheme: dark)").matches : saved === "1";
   document.documentElement.classList.toggle("dark", dark);
   document.querySelector('meta[name="theme-color"]').content = dark ? "#121316" : "#f7f3ec";
+  $("#ico-moon").hidden = !dark; $("#ico-sun").hidden = dark;           // l'icône montre le mode actuel
+  const t = $("#btn-theme"); t.title = t.ariaLabel = `Mode ${dark ? "sombre" : "clair"} (${saved === null ? "automatique" : "choisi"}) : appuyer pour changer`;
+  const sel = $("#set-theme"); if (sel) sel.value = saved === null ? "auto" : saved === "1" ? "dark" : "light";
+}
+function setTheme(v) {                    // "auto" | "light" | "dark"
+  if (v === "auto") localStorage.removeItem("dark"); else localStorage.setItem("dark", v === "dark" ? "1" : "0");
+  applyTheme();
 }
 
 /* ---------- Bibliothèque ---------- */
@@ -714,6 +721,13 @@ function renderSettings() {
   const s = st.settings, f = $("#settings-form");
   f.replaceChildren();
 
+  const g0 = el("fieldset"); g0.append(el("legend", "Affichage"));
+  const th = el("select"); th.id = "set-theme";
+  for (const [v, l] of [["auto", "Automatique (comme le téléphone)"], ["light", "Clair — Papier chaud"], ["dark", "Sombre — Nocturne"]]) {
+    const o = el("option", l); o.value = v; th.append(o);
+  }
+  th.onchange = () => setTheme(th.value);     // appliqué tout de suite, propre à cet appareil
+  g0.append(field("Thème", th));
   const g1 = el("fieldset"); g1.append(el("legend", "Traduction"));
   const auto = el("label", undefined, "check"), acb = el("input"); acb.type = "checkbox"; acb.id = "set-auto"; acb.checked = s.auto_translate;
   auto.append(acb, el("span", "Traduire en français par défaut les nouveaux documents dans une autre langue"));
@@ -738,7 +752,8 @@ function renderSettings() {
 
   const save = el("button", "Enregistrer"); save.type = "submit";
   const msg = el("p", "", "muted"); msg.id = "settings-msg";
-  f.append(g1, g2, g3, g4, save, msg);
+  f.append(g0, g1, g2, g3, g4, save, msg);
+  applyTheme();
 }
 function roleBlock(role, s) {
   const r = s.roles[role], box = el("div");
