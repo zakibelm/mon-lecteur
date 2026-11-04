@@ -3,7 +3,7 @@
 #
 #   1) Copier le projet COMPLET dans /opt/lecteur (app/, static/, tools/, tests/, requirements.txt, .env.example, backup.sh, deploy.sh)
 #   2) sudo DOMAIN=lecteur.ton-domaine.com /opt/lecteur/deploy.sh
-#      (DOMAIN est optionnel : sans lui, aucun HTTPS public n'est configuré et l'app reste sur 127.0.0.1:8000)
+#      (DOMAIN est optionnel : sans lui, aucun HTTPS public n'est configuré et l'app reste sur 127.0.0.1, port 8000 ou le premier libre dès 8100)
 set -euo pipefail
 
 APP_DIR=/opt/lecteur
@@ -32,7 +32,7 @@ say "2. Paquets système"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq python3-venv tesseract-ocr tesseract-ocr-fra tesseract-ocr-eng tesseract-ocr-ara \
-  tesseract-ocr-chi-sim tesseract-ocr-chi-tra tesseract-ocr-jpn tesseract-ocr-kor ffmpeg ufw curl
+  tesseract-ocr-chi-sim tesseract-ocr-chi-tra tesseract-ocr-jpn tesseract-ocr-kor ffmpeg ufw curl iproute2
 python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
   || fail "Python 3.10 ou plus récent requis (version actuelle : $(python3 -V)). Ubuntu 22.04+ / Debian 12+ conviennent."
 
@@ -80,6 +80,34 @@ fi
 chown "$APP_USER:$APP_USER" .env
 chmod 600 .env
 TOKEN="$(grep '^API_TOKEN=' .env | cut -d= -f2-)"
+
+# Port local de l'app (127.0.0.1 seulement). Ordre : APP_PORT dans .env > port du service déjà installé >
+# 8000 s'il est libre > premier port libre à partir de 8100. Un port déjà pris par un AUTRE service n'est jamais
+# réutilisé (ex. 8000 servi par une autre application du VPS).
+port_busy() {   # sans « ss », on tente une connexion : un port qui répond est pris
+  if command -v ss >/dev/null; then ss -ltnH "( sport = :$1 )" 2>/dev/null | grep -q .
+  else (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; fi
+}
+port_owner() {   # utilisateur du processus qui écoute sur ce port (vide si libre)
+  local pid; pid="$(ss -ltnpH "( sport = :$1 )" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)"
+  [ -n "$pid" ] && ps -o user= -p "$pid" | tr -d ' '
+}
+APP_PORT="$(grep '^APP_PORT=' .env | cut -d= -f2- || true)"
+UNIT=/etc/systemd/system/lecteur.service
+if [ -z "$APP_PORT" ] && [ -f "$UNIT" ]; then    # port de l'installation précédente : gardé seulement s'il est encore à nous
+  OLD="$(sed -n 's/.*--port \([0-9][0-9]*\).*/\1/p' "$UNIT" | head -1)"
+  if [ -n "$OLD" ] && { ! port_busy "$OLD" || [ "$(port_owner "$OLD")" = "$APP_USER" ]; }; then APP_PORT="$OLD"
+  elif [ -n "$OLD" ]; then warn "Le port ${OLD} du service précédent est pris par un autre service : nouveau port choisi."; fi
+fi
+if [ -z "$APP_PORT" ]; then
+  for p in 8000 $(seq 8100 8199); do port_busy "$p" || { APP_PORT="$p"; break; }; done
+fi
+[ -n "$APP_PORT" ] || fail "Aucun port libre trouvé entre 8000 et 8199."
+if port_busy "$APP_PORT" && [ "$(port_owner "$APP_PORT")" != "$APP_USER" ]; then
+  fail "Le port ${APP_PORT} est déjà utilisé par un autre service : mets APP_PORT=<port libre> dans .env puis relance."
+fi
+if grep -q '^APP_PORT=' .env; then sed -i "s|^APP_PORT=.*|APP_PORT=${APP_PORT}|" .env; else echo "APP_PORT=${APP_PORT}" >> .env; fi
+echo "Port local de l'app : 127.0.0.1:${APP_PORT}"
 as_app bash -c 'set -a; . ./.env; set +a; venv/bin/python -c "from app import config; config.validate()"' \
   || fail "API_TOKEN invalide dans .env (voir message ci-dessus)."
 
@@ -118,7 +146,7 @@ User=${APP_USER}
 Group=${APP_USER}
 WorkingDirectory=${APP_DIR}
 EnvironmentFile=${APP_DIR}/.env
-ExecStart=${APP_DIR}/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+ExecStart=${APP_DIR}/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port ${APP_PORT}
 Restart=on-failure
 NoNewPrivileges=true
 PrivateTmp=true
@@ -133,7 +161,7 @@ systemctl restart lecteur.service
 
 ok=0
 for _ in $(seq 1 20); do
-  if curl -fs -H "Authorization: Bearer ${TOKEN}" http://127.0.0.1:8000/api/config >/dev/null; then ok=1; break; fi
+  if curl -fs -H "Authorization: Bearer ${TOKEN}" "http://127.0.0.1:${APP_PORT}/api/config" >/dev/null; then ok=1; break; fi
   sleep 1
 done
 if [ "$ok" -ne 1 ]; then journalctl -u lecteur -n 30 --no-pager; fail "Le service ne répond pas."; fi
@@ -141,19 +169,19 @@ echo "✔ Service actif et authentifié"
 
 say "9. HTTPS (Caddy) — seulement si DOMAIN est défini et si 80/443 sont libres ou déjà à Caddy"
 if [ -z "$DOMAIN" ]; then
-  warn "DOMAIN non défini : pas d'accès public. Test possible par tunnel : ssh -L 8000:127.0.0.1:8000 utilisateur@vps"
+  warn "DOMAIN non défini : pas d'accès public. Test possible par tunnel : ssh -L ${APP_PORT}:127.0.0.1:${APP_PORT} utilisateur@vps"
 else
   BUSY="$(ss -ltnpH '( sport = :80 or sport = :443 )' 2>/dev/null | grep -v '"caddy"' || true)"
   if [ -n "$BUSY" ]; then
     warn "Les ports 80/443 sont déjà utilisés par un autre service (nginx, Traefik…). Caddy n'est PAS touché."
-    echo "   Ajoute à ton reverse proxy existant : ${DOMAIN} → http://127.0.0.1:8000 (taille max du corps : 110 Mo)."
+    echo "   Ajoute à ton reverse proxy existant : ${DOMAIN} → http://127.0.0.1:${APP_PORT} (taille max du corps : 110 Mo)."
   else
     apt-get install -y -qq caddy
     BLOCK="${DOMAIN} {
     request_body {
         max_size 110MB
     }
-    reverse_proxy 127.0.0.1:8000
+    reverse_proxy 127.0.0.1:${APP_PORT}
 }"
     if [ -f /etc/caddy/Caddyfile ] && grep -q "^${DOMAIN}" /etc/caddy/Caddyfile; then
       echo "Bloc ${DOMAIN} déjà présent dans le Caddyfile."
@@ -177,5 +205,5 @@ as_app ./backup.sh && echo "✔ Première sauvegarde réussie"
 warn "Cette sauvegarde est sur le même disque : copie-la aussi ailleurs (rclone vers un stockage distant gratuit, par exemple)."
 
 say "TERMINÉ"
-if [ -n "$DOMAIN" ]; then ADDR="https://${DOMAIN}"; else ADDR="http://127.0.0.1:8000 (via le tunnel SSH)"; fi
+if [ -n "$DOMAIN" ]; then ADDR="https://${DOMAIN}"; else ADDR="http://127.0.0.1:${APP_PORT} (via le tunnel SSH)"; fi
 echo "Ouvre ${ADDR} dans Chrome, saisis le jeton, puis menu ⋮ → Installer l'application."

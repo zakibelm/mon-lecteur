@@ -82,6 +82,11 @@ else
   res ✖ "deploy.sh en échec — voir ci-dessus"; systemctl is-active lecteur >/dev/null || exit 1
 fi
 TOKEN="$(grep '^API_TOKEN=' "$APP/.env" | cut -d= -f2-)"
+APP_PORT="$(grep '^APP_PORT=' "$APP/.env" | cut -d= -f2-)"
+[ -n "$APP_PORT" ] || APP_PORT="$(sed -n 's/.*--port \([0-9][0-9]*\).*/\1/p' /etc/systemd/system/lecteur.service 2>/dev/null | head -1)"
+APP_PORT="${APP_PORT:-8000}"
+BASE="http://127.0.0.1:$APP_PORT"
+echo "Le Lecteur écoute sur $BASE (un port déjà utilisé par un autre service n'est jamais pris)"
 H=(-H "Authorization: Bearer $TOKEN")
 [ "${#TOKEN}" -ge 32 ] && res ✔ "API_TOKEN de ${#TOKEN} caractères" || res ✖ "API_TOKEN trop court"
 grep -nE '^[A-Z_]+=.*[[:space:]]#' "$APP/.env" && res ✖ ".env : commentaire en fin de ligne" || res ✔ ".env sans commentaire en fin de ligne"
@@ -112,8 +117,8 @@ fi
 # ---------------------------------------------------------------- 5. Vérifications du service
 say "5. SERVICE"
 res "$([ "$(systemctl is-active lecteur)" = active ] && echo ✔ || echo ✖)" "systemctl is-active lecteur : $(systemctl is-active lecteur)"
-CFG="$(curl -fs "${H[@]}" http://127.0.0.1:8000/api/config)" && res ✔ "GET /api/config : $CFG" || res ✖ "GET /api/config en échec"
-[ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/api/config)" = 401 ] && res ✔ "sans jeton : 401" || res ✖ "l'API répond sans jeton !"
+CFG="$(curl -fs "${H[@]}" "$BASE/api/config")" && res ✔ "GET /api/config : $CFG" || res ✖ "GET /api/config en échec"
+[ "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/config")" = 401 ] && res ✔ "sans jeton : 401" || res ✖ "l'API répond sans jeton !"
 
 # ---------------------------------------------------------------- 6. Accès tablette
 say "6. ACCÈS DEPUIS LA TABLETTE"
@@ -124,21 +129,41 @@ if [ "$MODE" = A ]; then
 elif command -v tailscale >/dev/null && TSJ="$(tailscale status --json 2>/dev/null)"; then
   echo "Option B : $DOMAIN ne pointe pas vers ce VPS (${DNSIP:-NXDOMAIN}) → Tailscale Serve (HTTPS privé, sans DNS public)."
   TSNAME="$(printf '%s' "$TSJ" | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')"
-  SERVE="$(tailscale serve status 2>&1)"; echo "État Serve existant :"; echo "$SERVE"
-  if echo "$SERVE" | grep -q '127.0.0.1:8000'; then
-    PORT="$(echo "$SERVE" | grep -oE "$TSNAME(:[0-9]+)?" | head -1 | cut -s -d: -f2)"
-  elif echo "$SERVE" | grep -qE "https://$TSNAME( |/|$)"; then
-    PORT=8443                                     # 443 déjà servi par autre chose : on n'y touche pas
-  else PORT=443; fi
-  if ! echo "$SERVE" | grep -q '127.0.0.1:8000'; then
-    if [ "$PORT" = 443 ]; then OUT="$(timeout 40 tailscale serve --bg 8000 2>&1)"; else OUT="$(timeout 40 tailscale serve --bg --https="$PORT" 8000 2>&1)"; fi
-    echo "$OUT"
-  fi
-  URL="https://$TSNAME$([ "${PORT:-443}" != 443 ] && echo ":$PORT")"
   TSIP="$(tailscale ip -4 | head -1)"
-  CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 --resolve "$TSNAME:${PORT:-443}:$TSIP" "$URL/manifest.webmanifest")"
+  echo "État Serve existant :"; tailscale serve status 2>&1
+  SJ="$(tailscale serve status --json 2>/dev/null || echo '{}')"
+  read -r OURS USED < <(printf '%s' "$SJ" | python3 -c '
+import json, sys
+d = json.loads(sys.stdin.read() or "{}") or {}
+used = sorted((d.get("TCP") or {}).keys())
+ours = ""
+for hp, web in (d.get("Web") or {}).items():
+    for h in (web.get("Handlers") or {}).values():
+        if str(h.get("Proxy", "")).rstrip("/").endswith(":" + sys.argv[1]):
+            ours = hp.rsplit(":", 1)[1]
+print(ours or "-", ",".join(used) or "-")' "$APP_PORT")
+  PORT=""
+  if [ "$OURS" != "-" ]; then
+    PORT="$OURS"; echo "Entrée Serve existante réutilisée : https port $PORT → $BASE"
+  fi
+  check_https() { curl -s -o /dev/null -w '%{http_code}' --max-time 20 --resolve "$TSNAME:$1:$TSIP" "https://$TSNAME:$1/manifest.webmanifest"; }
+  if [ -z "$PORT" ]; then
+    # 443 peut être capté par un nginx qui écoute sur toutes les interfaces : tout port déjà en écoute est évité
+    for p in 443 8444 8445 8446 10443; do
+      case ",$USED," in *",$p,"*) continue;; esac
+      if command -v ss >/dev/null && ss -ltnH "( sport = :$p )" | grep -q .; then echo "  port $p déjà en écoute localement : évité"; continue; fi
+      timeout 40 tailscale serve --bg --https="$p" "$APP_PORT" 2>&1
+      if [ "$(check_https "$p")" = 200 ]; then PORT="$p"; break; fi
+      echo "  port $p : HTTPS non vérifié → je retire uniquement l'entrée que je viens d'ajouter"
+      tailscale serve --https="$p" off >/dev/null 2>&1
+    done
+  fi
+  if [ -n "$PORT" ]; then
+    URL="https://$TSNAME$([ "$PORT" != 443 ] && echo ":$PORT")"
+    CODE="$(check_https "$PORT")"
+  else CODE="aucun port"; fi
   if [ "$CODE" = 200 ]; then res ✔ "HTTPS Tailscale OK ($URL/manifest.webmanifest → 200, certificat valide)"
-  else res ✖ "HTTPS Tailscale non vérifié (code $CODE) — si un lien login.tailscale.com est affiché ci-dessus, ouvre-le pour activer HTTPS/Serve"; fi
+  else URL=""; res ✖ "HTTPS Tailscale non vérifié ($CODE) — si un lien login.tailscale.com est affiché ci-dessus, ouvre-le pour activer HTTPS/Serve"; fi
 else
   res ✖ "ni DNS prêt ni Tailscale : pas d'URL HTTPS"
 fi
@@ -160,6 +185,12 @@ else
   echo "Conteneur : $OMNI_CTR"; docker port "$OMNI_CTR"
   CANDS=()
   while read -r hp; do [ -n "$hp" ] && CANDS+=("http://127.0.0.1:${hp##*:}"); done < <(docker port "$OMNI_CTR" 2>/dev/null | awk '{print $3}' | sort -u)
+  if [ "$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$OMNI_CTR")" = host ]; then
+    CID="$(docker inspect -f '{{.Id}}' "$OMNI_CTR")"; echo "Réseau « host » : recherche des ports écoutés par le conteneur"
+    while read -r port pid; do
+      grep -q "$CID" "/proc/$pid/cgroup" 2>/dev/null && CANDS+=("http://127.0.0.1:$port")
+    done < <(ss -ltnpH 2>/dev/null | awk '{n=split($4,a,":"); if (match($0,/pid=[0-9]+/)) print a[n], substr($0,RSTART+4,RLENGTH-4)}' | sort -u)
+  fi
   for ip in $(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$OMNI_CTR"); do
     for p in $(docker inspect -f '{{range $p, $_ := .Config.ExposedPorts}}{{$p}} {{end}}' "$OMNI_CTR" | sed 's#/tcp##g; s#/udp##g'); do CANDS+=("http://$ip:$p"); done
   done
@@ -177,11 +208,11 @@ else
   else
     res ✔ "OmniRoute trouvé : $OMNI_URL"
     BODY="$(python3 -c 'import json,os,sys; p={"base_url": sys.argv[1]}; k=os.environ.get("OMNI_KEY"); p.update({"api_key": k} if k else {}); print(json.dumps({"providers": {"omniroute": p}}))' "$OMNI_URL")"
-    curl -fs -X PUT "${H[@]}" -H 'Content-Type: application/json' -d "$BODY" http://127.0.0.1:8000/api/settings >/dev/null \
+    curl -fs -X PUT "${H[@]}" -H 'Content-Type: application/json' -d "$BODY" "$BASE/api/settings" >/dev/null \
       && res ✔ "URL OmniRoute enregistrée via PUT /api/settings" || res ✖ "PUT /api/settings (OmniRoute) refusé"
-    AP="$(curl -fs "${H[@]}" http://127.0.0.1:8000/api/settings | python3 -c 'import json,sys; print(json.load(sys.stdin)["allow_paid"])')"
+    AP="$(curl -fs "${H[@]}" "$BASE/api/settings" | python3 -c 'import json,sys; print(json.load(sys.stdin)["allow_paid"])')"
     [ "$AP" = False ] && res ✔ "allow_paid = False" || res ✖ "allow_paid = $AP !"
-    MODELS="$(curl -fs "${H[@]}" 'http://127.0.0.1:8000/api/llm/models?provider=omniroute')"
+    MODELS="$(curl -fs "${H[@]}" "$BASE/api/llm/models?provider=omniroute")"
     NM="$(printf '%s' "$MODELS" | python3 -c 'import json,sys; m=json.load(sys.stdin)["models"]; print(len(m)); [print("   ", x["id"], "gratuit" if x["free"] else ("payant" if x["free"] is False else "prix inconnu")) for x in m[:60]]')"
     echo "« Charger les modèles » : $NM"
     if [ -z "${OMNI_MODEL:-}" ]; then        # choix PRUDENT : uniquement un identifiant qui se déclare gratuit
@@ -196,26 +227,26 @@ print(pick[0] if pick else "")')"
     else
       echo "Route testée : $OMNI_MODEL"
       T0="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      ROLES_BEFORE="$(curl -fs "${H[@]}" http://127.0.0.1:8000/api/settings | python3 -c 'import json,sys; print(json.dumps({"roles": json.load(sys.stdin)["roles"]}))')"
-      restore() { curl -fs -X PUT "${H[@]}" -H 'Content-Type: application/json' -d "$ROLES_BEFORE" http://127.0.0.1:8000/api/settings >/dev/null; }
+      ROLES_BEFORE="$(curl -fs "${H[@]}" "$BASE/api/settings" | python3 -c 'import json,sys; print(json.dumps({"roles": json.load(sys.stdin)["roles"]}))')"
+      restore() { curl -fs -X PUT "${H[@]}" -H 'Content-Type: application/json' -d "$ROLES_BEFORE" "$BASE/api/settings" >/dev/null; }
       trap restore EXIT
       for role in translate chat; do         # « Tester » : bascule TEMPORAIRE du rôle, puis restauration
         PUTR="$(curl -s -X PUT "${H[@]}" -H 'Content-Type: application/json' \
-          -d "{\"roles\":{\"$role\":{\"provider\":\"omniroute\",\"model\":\"$OMNI_MODEL\"}}}" http://127.0.0.1:8000/api/settings)"
+          -d "{\"roles\":{\"$role\":{\"provider\":\"omniroute\",\"model\":\"$OMNI_MODEL\"}}}" "$BASE/api/settings")"
         if ! echo "$PUTR" | grep -q '"omniroute"'; then res ✖ "bascule $role → OmniRoute refusée : $PUTR"; restore; continue; fi
-        R="$(curl -s -X POST "${H[@]}" -H 'Content-Type: application/json' -d "{\"role\":\"$role\"}" http://127.0.0.1:8000/api/llm/test)"
+        R="$(curl -s -X POST "${H[@]}" -H 'Content-Type: application/json' -d "{\"role\":\"$role\"}" "$BASE/api/llm/test")"
         echo "  Tester $role → $R"
         echo "$R" | grep -q '"ok":true.*"model":"omniroute:' && res ✔ "OmniRoute « Tester » $role" || res ✖ "OmniRoute « Tester » $role"
         restore
       done
       EMB="$(printf '%s' "$MODELS" | python3 -c 'import json,sys; e=[m["id"] for m in json.load(sys.stdin)["models"] if "embed" in m["id"].lower() and ("free" in m["id"].lower())]; print(e[0] if e else "")')"
       if [ -n "$EMB" ]; then
-        curl -fs -X PUT "${H[@]}" -H 'Content-Type: application/json' -d "{\"roles\":{\"embed\":{\"provider\":\"omniroute\",\"model\":\"$EMB\"}}}" http://127.0.0.1:8000/api/settings >/dev/null
-        R="$(curl -s -X POST "${H[@]}" -H 'Content-Type: application/json' -d '{"role":"embed"}' http://127.0.0.1:8000/api/llm/test)"; echo "  Tester embed → $R"; restore
+        curl -fs -X PUT "${H[@]}" -H 'Content-Type: application/json' -d "{\"roles\":{\"embed\":{\"provider\":\"omniroute\",\"model\":\"$EMB\"}}}" "$BASE/api/settings" >/dev/null
+        R="$(curl -s -X POST "${H[@]}" -H 'Content-Type: application/json' -d '{"role":"embed"}' "$BASE/api/llm/test")"; echo "  Tester embed → $R"; restore
         echo "$R" | grep -q '"ok":true.*"model":"omniroute:' && res ✔ "OmniRoute « Tester » embed ($EMB)" || res ✖ "OmniRoute « Tester » embed"
       else res ⚠ "OmniRoute embed : aucune route d'embeddings gratuite identifiable → non testé"; fi
       restore; trap - EXIT
-      [ "$(curl -fs "${H[@]}" http://127.0.0.1:8000/api/settings | python3 -c 'import json,sys; print(json.dumps({"roles": json.load(sys.stdin)["roles"]}))')" = "$ROLES_BEFORE" ] \
+      [ "$(curl -fs "${H[@]}" "$BASE/api/settings" | python3 -c 'import json,sys; print(json.dumps({"roles": json.load(sys.stdin)["roles"]}))')" = "$ROLES_BEFORE" ] \
         && res ✔ "modèles par défaut restaurés à l'identique" || res ✖ "modèles par défaut NON restaurés : vérifie Réglages"
       say "6d. BENCHMARK qwen2.5:7b (Ollama) vs OmniRoute:$OMNI_MODEL — 5 passages identiques"
       val bench --omni-model "$OMNI_MODEL" && res ✔ "benchmark exécuté (temps mesurés ci-dessus)" || res ✖ "benchmark en échec"
@@ -235,7 +266,7 @@ say "6g. REDÉMARRAGE ET SAUVEGARDE"
 SNAP="$(as_app mktemp --suffix=.json)"
 val snapshot "$SNAP"
 systemctl restart lecteur
-for _ in $(seq 1 30); do curl -fs "${H[@]}" http://127.0.0.1:8000/api/config >/dev/null && break; sleep 1; done
+for _ in $(seq 1 30); do curl -fs "${H[@]}" "$BASE/api/config" >/dev/null && break; sleep 1; done
 val compare "$SNAP" && res ✔ "après systemctl restart : livres, traductions et réglages identiques" || res ✖ "données différentes après redémarrage"
 if (cd "$APP" && as_app ./backup.sh); then
   ARCH="$(find "$APP/backups" -name 'lecteur_*.tar.gz' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)"; TMPR="$(mktemp -d)"

@@ -10,7 +10,7 @@ Usage (depuis /opt/lecteur, avec le venv du projet) :
   venv/bin/python tools/validate_real.py bench [--omni-model M]  # 6d  qwen2.5:7b (Ollama) vs OmniRoute
   venv/bin/python tools/validate_real.py snapshot FICHIER      # 6g  état avant redémarrage
   venv/bin/python tools/validate_real.py compare FICHIER       # 6g  comparaison après redémarrage
-Variables : LECTEUR_URL (défaut http://127.0.0.1:8000), API_TOKEN (sinon lu dans .env),
+Variables : LECTEUR_URL (défaut http://127.0.0.1:<APP_PORT du .env>), API_TOKEN (sinon lu dans .env),
             OMNI_BASE_URL, OMNI_KEY, OMNI_MODEL (benchmark OmniRoute).
 """
 import json
@@ -40,7 +40,7 @@ def _env_file() -> dict:
 
 
 ENV = {**_env_file(), **{k: v for k, v in os.environ.items() if k in ("API_TOKEN", "PIPER_CMD")}}
-URL = os.getenv("LECTEUR_URL", "http://127.0.0.1:8000").rstrip("/")
+URL = os.getenv("LECTEUR_URL", f"http://127.0.0.1:{ENV.get('APP_PORT') or 8000}").rstrip("/")
 TOKEN = ENV.get("API_TOKEN", "")
 H = {"Authorization": f"Bearer {TOKEN}"}
 OK, KO = "✔", "✖"
