@@ -99,6 +99,11 @@ os.environ.update({
     "DATA_DIR": str(TMP / "data"), "API_TOKEN": TOKEN, "TTS_PROVIDER": "browser",
     "LLM_BASE_URL": f"http://127.0.0.1:{srv.server_port}/v1", "PIPER_CMD": str(fake_piper),
     "PIPER_VOICE_FR": "dummy.onnx",
+    # voix isolées de la machine : résultat identique que les voix réelles soient installées ou non
+    "PIPER_VOICE_FR_HOMME": str(TMP / "voix-absentes" / "fr_FR-tom-medium.onnx"),
+    "PIPER_VOICE_EN": str(TMP / "voix-absentes" / "en_US-lessac-medium.onnx"),
+    "PIPER_VOICE_EN_HOMME": str(TMP / "voix-absentes" / "en_US-ryan-medium.onnx"),
+    "PIPER_VOICE_AR": str(TMP / "voix-absentes" / "ar_JO-kareem-medium.onnx"),
 })
 
 import pymupdf as fitz  # noqa: E402
