@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1f2937">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon-192.png">
+  <link rel="stylesheet" href="style.css">
+  <title>Lecteur de livres</title>
+</head>
+<body>
+  <header>
+    <nav>
+      <button data-view="library" class="tab active">📚 Bibliothèque</button>
+      <button data-view="reader" class="tab">📖 Lecture</button>
+      <button data-view="chat" class="tab">💬 Discussion</button>
+      <button data-view="settings" class="tab">⚙️ Réglages</button>
+    </nav>
+    <button id="btn-theme" title="Mode sombre">🌙</button>
+  </header>
+
+  <main>
+    <section id="view-library" class="view">
+      <form id="upload-form">
+        <input type="file" id="file" accept=".pdf,.png,.jpg,.jpeg" required>
+        <input type="text" id="title" placeholder="Titre (optionnel)">
+        <select id="lang" aria-label="Langue du document"></select>
+        <p class="muted" style="margin:0">Scans chinois, japonais, coréen ou arabe : l'écriture est reconnue automatiquement. Seul le chinois traditionnel doit être choisi ici.</p>
+        <label class="check"><input type="checkbox" id="translate" checked> Traduire en français si le document est dans une autre langue</label>
+        <button type="submit">Importer</button>
+      </form>
+      <p id="upload-msg" class="muted"></p>
+      <ul id="books"></ul>
+    </section>
+
+    <section id="view-reader" class="view" hidden>
+      <h2 id="book-title">Aucun livre ouvert</h2>
+      <p id="book-status" class="muted"></p>
+      <div id="reader-tools" hidden>
+        <button id="btn-orig" title="Afficher le texte d'origine sous la traduction">🈯 Original</button>
+        <details id="book-opts"><summary>Options du livre</summary>
+          <label class="check"><input type="checkbox" id="chk-translate"> Traduire en français</label>
+          <div class="row">
+            <button id="btn-retr">↻ Retraduire ce passage</button>
+            <button id="btn-retr-all">↻ Retraduire tout le livre</button>
+            <button id="btn-reindex">⟳ Réindexer la discussion</button>
+          </div>
+        </details>
+      </div>
+      <div id="text"></div>
+    </section>
+
+    <section id="view-chat" class="view" hidden>
+      <div id="chat-log"></div>
+      <form id="chat-form">
+        <input type="text" id="question" placeholder="Pose une question sur le livre…" required maxlength="1000">
+        <button type="submit">Envoyer</button>
+      </form>
+    </section>
+
+    <section id="view-settings" class="view" hidden>
+      <h2>Réglages</h2>
+      <form id="settings-form" autocomplete="off"></form>
+    </section>
+  </main>
+
+  <footer id="player" hidden>
+    <button id="btn-prev" aria-label="Précédent">⏮</button>
+    <button id="btn-play" aria-label="Lecture / pause">▶️</button>
+    <button id="btn-next" aria-label="Suivant">⏭</button>
+    <select id="speed" aria-label="Vitesse">
+      <option value="0.8">0.8×</option><option value="1" selected>1×</option>
+      <option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option>
+    </select>
+    <button id="btn-listen" title="Écoute seule (masque le texte)">👁</button>
+    <span id="pos" class="muted"></span>
+  </footer>
+
+  <audio id="audio" preload="auto"></audio>
+  <script src="app.js"></script>
+</body>
+</html>
