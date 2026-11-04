@@ -337,6 +337,56 @@ def get_cover(book_id: str):
     return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
 
 
+def _source(book_id: str) -> Path:
+    src = next((config.DATA_DIR / "books" / book_id).glob("source.*"), None)
+    if not src:
+        raise HTTPException(404, "Fichier d'origine introuvable")
+    return src
+
+
+@app.get("/api/books/{book_id}/figures", dependencies=[Depends(auth)])
+def get_figures(book_id: str):
+    """Pages qui contiennent des images : {"pages": {"12": 2, …}}. Calculé une fois, gardé en cache."""
+    import json as _json
+    with db() as c:
+        _book_or_404(c, book_id)
+    cache = config.DATA_DIR / "books" / book_id / "figures.json"
+    if not cache.exists():
+        try:
+            figs = extract.page_figures(_source(book_id))
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001 — sans figures, la lecture continue
+            log.warning("Figures illisibles pour %s : %s", book_id, e)
+            figs = {}
+        cache.write_text(_json.dumps({str(k): v for k, v in figs.items()}))
+    figs = _json.loads(cache.read_text())
+    return {"pages": {p: len(b) for p, b in figs.items()}}
+
+
+@app.get("/api/books/{book_id}/pages/{page_no}.jpg", dependencies=[Depends(auth)])
+def get_page_image(book_id: str, page_no: int, fig: int | None = None):
+    """Page entière (fig absent) ou figure n° fig de la page, en JPEG, mise en cache sur disque."""
+    import json as _json
+    with db() as c:
+        book = _book_or_404(c, book_id)
+    if page_no < 1 or (book["pages_total"] and page_no > book["pages_total"]):
+        raise HTTPException(404, "Page introuvable")
+    folder = config.DATA_DIR / "books" / book_id / "pages"
+    out = folder / (f"p{page_no}.jpg" if fig is None else f"p{page_no}-f{fig}.jpg")
+    if not out.exists():
+        clip = None
+        if fig is not None:
+            get_figures(book_id)
+            boxes = _json.loads((config.DATA_DIR / "books" / book_id / "figures.json").read_text()).get(str(page_no), [])
+            if not 0 <= fig < len(boxes):
+                raise HTTPException(404, "Image introuvable")
+            clip = boxes[fig]
+        folder.mkdir(exist_ok=True)
+        out.write_bytes(extract.render_page(_source(book_id), page_no, clip, width=900 if clip else 1200))
+    return FileResponse(out, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+
+
 @app.put("/api/books/{book_id}/progress", dependencies=[Depends(auth)])
 def set_progress(book_id: str, body: Progress):
     with db() as c:

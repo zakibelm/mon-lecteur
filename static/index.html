@@ -84,6 +84,7 @@
           </select>
           <button id="btn-orig" class="chip" aria-pressed="true" title="Afficher l'original au-dessus de la traduction">Bilingue</button>
           <button id="btn-listen" class="chip" title="Écoute seule (masque le texte)">Écoute seule</button>
+          <button id="btn-stopimg" class="chip" aria-pressed="false" title="Mettre la lecture en pause en arrivant sur une page avec image">Arrêt sur images</button>
           <span id="pos" class="muted"></span>
         </div>
         <div id="prep-box" class="card prep">
@@ -138,6 +139,18 @@
       <form id="settings-form" autocomplete="off"></form>
     </section>
   </main>
+
+  <!-- Visionneuse : page entière ou image -->
+  <div id="viewer" class="viewer" hidden role="dialog" aria-modal="true" aria-label="Page du document">
+    <div class="viewer-bar">
+      <button id="vw-prev" class="icon-btn" aria-label="Page précédente">‹</button>
+      <span id="vw-cap"></span>
+      <button id="vw-next" class="icon-btn" aria-label="Page suivante">›</button>
+      <button id="vw-close" class="icon-btn" aria-label="Fermer">✕</button>
+    </div>
+    <div id="vw-body" class="viewer-body"><img id="vw-img" alt=""></div>
+    <p class="viewer-hint">Touche l'image pour zoomer · ✕ pour revenir à la lecture</p>
+  </div>
 
   <!-- Ajout au vocabulaire depuis une sélection -->
   <button id="vocab-add" class="btn-primary floating" hidden>＋ Vocabulaire</button>

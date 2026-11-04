@@ -237,3 +237,45 @@ def pdf_meta(path: Path) -> tuple[str, str]:
     if not (2 <= len(author) <= 120) or _JUNK_TITLE.search(author):
         author = ""
     return title, author
+
+
+# ---------- images des pages (figures, schémas, photos) ----------
+FIG_MIN_SHARE = 0.03          # une figure couvre au moins 3 % de la page (logos, puces ignorés)
+FIG_MIN_PT = 60               # et mesure au moins 60 × 60 points
+
+
+def page_figures(path: Path) -> dict[int, list[list[float]]]:
+    """{n° de page: [[x0, y0, x1, y1], …]} des images d'un PDF natif. Une page qui n'est qu'une image (scan)
+    n'a pas de « figure » : on la consulte en entier avec « Voir la page »."""
+    out: dict[int, list[list[float]]] = {}
+    if path.suffix.lower() != ".pdf":
+        return out
+    with fitz.open(path) as doc:
+        for i, page in enumerate(doc, 1):
+            area = page.rect.width * page.rect.height
+            if len(page.get_text("text").strip()) < 20:
+                continue                                       # page scannée (pas de texte) : consultée en entier
+            boxes = []
+            for info in page.get_image_info():
+                r = fitz.Rect(info["bbox"]) & page.rect
+                if r.is_empty or r.width < FIG_MIN_PT or r.height < FIG_MIN_PT or r.width * r.height < FIG_MIN_SHARE * area:
+                    continue
+                if any(fitz.Rect(b).intersects(r) and (fitz.Rect(b) & r).get_area() > 0.6 * r.get_area() for b in boxes):
+                    continue                                   # doublon (image répétée / superposée)
+                boxes.append([round(v, 1) for v in (r.x0, r.y0, r.x1, r.y1)])
+            if boxes:
+                out[i] = sorted(boxes, key=lambda b: (b[1], b[0]))
+    return out
+
+
+def render_page(path: Path, page_no: int, clip: list[float] | None = None, width: int = 1200) -> bytes:
+    """Page (ou zone d'une page) en JPEG, ~`width` px de large. Image source (PNG/JPG) : l'image elle-même."""
+    if path.suffix.lower() != ".pdf":
+        with Image.open(path) as img:
+            img = img.convert("RGB"); img.thumbnail((width, width * 3))
+            buf = io.BytesIO(); img.save(buf, "JPEG", quality=85); return buf.getvalue()
+    with fitz.open(path) as doc:
+        page = doc[page_no - 1]
+        rect = fitz.Rect(clip) if clip else page.rect
+        z = min(4.0, width / max(1.0, rect.width))
+        return page.get_pixmap(matrix=fitz.Matrix(z, z), clip=rect, alpha=False).tobytes("jpeg", jpg_quality=85)

@@ -387,6 +387,33 @@ def v22_tests(c):
     assert c.get(f"/api/books/{png}/cover", headers=H).headers["content-type"] == "image/jpeg"
     print("✔ couverture : 1re page en JPEG (PDF et image), refaite à la demande ; titre/auteur du PDF, jamais au-dessus d'un titre donné")
 
+    # --- images des pages : figures repérées (logos ignorés), page scannée consultable, rendu en JPEG ---
+    fig_png = png_with_text("Schema du moteur")             # 1400 × 300 px
+    logo = png_with_text("x")
+    dd = fitz.open()
+    p1 = dd.new_page(); p1.insert_textbox(fitz.Rect(50, 40, 550, 120), "Le moteur fonctionne ainsi, voir la figure ci-dessous. " * 2, fontsize=11)
+    p1.insert_image(fitz.Rect(50, 140, 550, 260), stream=fig_png)            # vraie figure
+    p1.insert_image(fitz.Rect(520, 790, 540, 805), stream=logo)              # logo minuscule : ignoré
+    p2 = dd.new_page(); p2.insert_textbox(fitz.Rect(50, 40, 550, 300), "Une page sans aucune image, seulement du texte suivi. " * 3, fontsize=11)
+    p3 = dd.new_page(); p3.insert_image(p3.rect, stream=png_with_text("Page scannee entiere"))   # page « scannée »
+    fb = upload(c, dd.tobytes(), "figures.pdf")
+    fg = c.get(f"/api/books/{fb}/figures", headers=H).json()["pages"]
+    assert fg == {"1": 1}, fg
+    im1 = c.get(f"/api/books/{fb}/pages/1.jpg", headers=H, params={"fig": 0})
+    assert im1.status_code == 200 and im1.content[:2] == b"\xff\xd8"
+    from PIL import Image as _I
+    w_, h_ = _I.open(io.BytesIO(im1.content)).size
+    assert 4.2 < w_ / h_ < 5.0, (w_, h_)                   # recadrée sur la figure (proportions de l'image : 4,67)
+    full = c.get(f"/api/books/{fb}/pages/3.jpg", headers=H)
+    assert full.status_code == 200 and _I.open(io.BytesIO(full.content)).size[0] >= 1100   # page scannée en entier
+    assert c.get(f"/api/books/{fb}/pages/1.jpg", headers=H, params={"fig": 5}).status_code == 404
+    assert c.get(f"/api/books/{fb}/pages/99.jpg", headers=H).status_code == 404
+    assert c.get(f"/api/books/{fb}/pages/1.jpg").status_code == 401
+    pi = c.post("/api/books", headers=H, files={"file": ("photo.png", fig_png, "image/png")}).json()["id"]
+    assert c.get(f"/api/books/{pi}/figures", headers=H).json()["pages"] == {}
+    assert c.get(f"/api/books/{pi}/pages/1.jpg", headers=H).status_code == 200
+    print("✔ images des pages : figure repérée et recadrée (logo ignoré), page scannée consultable, cache JPEG")
+
     # --- regroupement : phrases courtes d'une même page → un paragraphe (~30 s d'écoute), écritures non mélangées ---
     phrases = [f"Phrase courte numéro {i} du chapitre, lue en deux secondes." for i in range(20)]
     doc = fitz.open(); pg = doc.new_page()

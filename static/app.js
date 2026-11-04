@@ -355,6 +355,7 @@ async function openBook(id) {
   refreshPrep().catch(() => {});
   jget("/books").then(fillBookPick).catch(() => {});
   api(`/books/${id}/warmup`, { method: "POST" }).catch(() => {});   // modèle chargé avant qu'on en ait besoin
+  st.figPages = (await jget(`/books/${id}/figures`).catch(() => ({ pages: {} }))).pages; st.ackPage = new Set();
   await loadMoreSegments();
   showShortHint();
   $("#player").hidden = false; document.body.classList.add("has-player"); $("#reader-tools").hidden = false;
@@ -446,7 +447,7 @@ async function loadMoreSegments() {
   }
 }
 function addSegment(s) {
-  if (s.page !== st.lastPage) { $("#text").append(el("div", "Page " + s.page, "page-tag")); st.lastPage = s.page; }
+  if (s.page !== st.lastPage) { addPageHeader(s.page); st.lastPage = s.page; }
   const c = el("article", undefined, "seg");
   c.dataset.idx = s.idx;
   const head = el("div", undefined, "seg-head");
@@ -458,6 +459,67 @@ function addSegment(s) {
   st.segs.push(s);
   paint(s.idx);
 }
+function addPageHeader(page) {
+  const tag = el("div", undefined, "page-tag"); tag.dataset.page = page;
+  const view = el("button", "🖼 Voir la page");
+  view.onclick = (e) => { e.stopPropagation(); openViewer(page); };
+  tag.append(el("span", "Page " + page), view);
+  $("#text").append(tag);
+  const n = (st.figPages && st.figPages[page]) || 0;
+  for (let i = 0; i < n; i++) {
+    const f = el("figure", undefined, "fig"); f.dataset.page = page; f.dataset.fig = i;
+    const box = el("div", undefined, "fig-img"); box.append(el("span", "Image…", "muted"));
+    f.append(box, el("figcaption", `Image ${i + 1}${n > 1 ? "/" + n : ""} · page ${page} — touche pour agrandir`));
+    f.onclick = () => openViewer(page, i);
+    $("#text").append(f);
+    if (figObs) figObs.observe(f); else loadFig(f);
+  }
+}
+const figObs = "IntersectionObserver" in window ? new IntersectionObserver((ents) => {
+  for (const e of ents) if (e.isIntersecting) { figObs.unobserve(e.target); loadFig(e.target); }
+}, { rootMargin: "300px" }) : null;
+const imgCache = new Map();
+function pageImg(page, fig) {               // URL locale (blob) d'une page ou d'une figure, gardée pour la session
+  const key = `${st.book.id}|${page}|${fig ?? ""}`;
+  if (!imgCache.has(key)) imgCache.set(key, api(`/books/${st.book.id}/pages/${page}.jpg` + (fig !== undefined ? `?fig=${fig}` : ""))
+    .then(async (r) => (r.ok ? URL.createObjectURL(await r.blob()) : null)).catch(() => null));
+  return imgCache.get(key);
+}
+async function loadFig(f) {
+  const url = await pageImg(+f.dataset.page, +f.dataset.fig);
+  const box = f.querySelector(".fig-img");
+  if (!url) { box.replaceChildren(el("span", "Image indisponible", "muted")); return; }
+  const img = el("img"); img.src = url; img.alt = `Image de la page ${f.dataset.page}`; box.replaceChildren(img);
+}
+/* Visionneuse plein écran */
+async function openViewer(page, fig) {
+  st.vw = { page, fig };
+  $("#viewer").hidden = false; $("#vw-body").classList.remove("zoom");
+  const total = st.book.pages_total || page;
+  $("#vw-cap").textContent = fig !== undefined ? `Image ${fig + 1} · page ${page}` : `Page ${page} / ${total}`;
+  $("#vw-prev").disabled = page <= 1; $("#vw-next").disabled = page >= total;
+  $("#vw-img").removeAttribute("src");
+  const url = await pageImg(page, fig);
+  if (st.vw.page === page && st.vw.fig === fig) { if (url) $("#vw-img").src = url; else $("#vw-cap").textContent += " — indisponible"; }
+}
+$("#vw-close").onclick = () => { $("#viewer").hidden = true; };
+$("#vw-prev").onclick = () => openViewer(Math.max(1, st.vw.page - 1));
+$("#vw-next").onclick = () => openViewer(st.vw.page + 1);
+$("#vw-img").onclick = () => $("#vw-body").classList.toggle("zoom");
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#viewer").hidden) $("#viewer").hidden = true; });
+/* Arrêt sur images : en lecture continue, pause à l'arrivée sur une page qui contient une image */
+$("#btn-stopimg").onclick = (e) => {
+  const on = e.currentTarget.getAttribute("aria-pressed") !== "true";
+  e.currentTarget.setAttribute("aria-pressed", String(on)); localStorage.setItem("stopimg", on ? "1" : "0");
+};
+function shouldStopForImage(idx) {
+  if ($("#btn-stopimg").getAttribute("aria-pressed") !== "true") return false;
+  const s = st.segs[idx], prevSeg = st.segs[idx - 1];
+  if (!s || !(st.figPages && st.figPages[s.page]) || (prevSeg && prevSeg.page === s.page) || st.ackPage.has(s.page)) return false;
+  st.ackPage.add(s.page);
+  return true;
+}
+
 /* Carte bilingue : original (discret) puis traduction française en serif. Sans traduction : le texte seul. */
 function paint(idx) {
   const s = st.segs[idx], c = segEl(idx);
@@ -558,8 +620,19 @@ function setPlayIcon() {
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = st.playing ? "playing" : "paused";
 }
 
-async function play(idx) {
+async function play(idx, { auto = false } = {}) {
   if (!st.book || idx < 0 || idx >= st.segs.length) return;
+  if (auto && shouldStopForImage(idx)) {                // une image à regarder : pause, ▶ pour continuer
+    st.playId++; st.playing = false; stopSound(); highlight(idx, false); setPlayIcon();
+    const f = document.querySelector(`#text .fig[data-page="${st.segs[idx].page}"]`);
+    document.querySelector("#text .fig.focus")?.classList.remove("focus");
+    if (f) { f.classList.add("focus"); f.scrollIntoView({ block: "center", behavior: "smooth" }); }
+    note(`🖼 Image page ${st.segs[idx].page} : regarde-la (touche pour agrandir), puis ▶ pour continuer.`);
+    st.waitMsg = `🖼 Image p.${st.segs[idx].page} · ▶ pour continuer`; updateMiniPlayer();
+    return;
+  }
+  document.querySelector("#text .fig.focus")?.classList.remove("focus");
+  if (st.waitMsg && st.waitMsg.startsWith("🖼")) { st.waitMsg = ""; }
   const id = ++st.playId;
   speechSynthesis.cancel();
   if (st.cfg.server_audio) startFiller(); else audio.pause();      // jamais de silence entre deux passages
@@ -590,7 +663,7 @@ async function play(idx) {
     } else {                                    // voix de l'appareil, aucun audio serveur
       const u = new SpeechSynthesisUtterance(info.text);
       u.lang = info.speak_tag || "fr-FR"; u.rate = st.speed;
-      u.onend = () => { if (id === st.playId) next(); };
+      u.onend = () => { if (id === st.playId) next(true); };
       u.onerror = (ev) => {
         if (id !== st.playId || ev.error === "canceled" || ev.error === "interrupted") return;
         st.playing = false; setPlayIcon(); note("Synthèse vocale indisponible : " + ev.error);
@@ -633,8 +706,8 @@ function togglePlay() {
   }
   play(st.cur >= 0 ? st.cur : 0);
 }
-function next() {
-  if (st.cur + 1 < st.segs.length) return play(st.cur + 1);
+function next(fromEnd) {
+  if (st.cur + 1 < st.segs.length) return play(st.cur + 1, { auto: fromEnd === true });
   if (st.book.status === "processing") {          // la suite arrive encore de l'extraction
     const id = st.playId;
     setTimeout(() => { if (st.playing && id === st.playId) next(); }, 2000);
@@ -1028,7 +1101,7 @@ $("#btn-mp-voice").onclick = () => {
   sel.dispatchEvent(new Event("change"));
 };
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (localStorage.getItem("dark") === null) applyTheme(); });
-audio.onended = () => { if (!isFiller()) next(); };
+audio.onended = () => { if (!isFiller()) next(true); };
 // pause imposée par le système (appel, autre app audio) : on reflète l'état au lieu de croire que ça joue encore
 audio.onpause = () => { if (st.playing && !isFiller() && !audio.ended && audio.currentTime < audio.duration) { st.playing = false; setPlayIcon(); } };
 
@@ -1039,6 +1112,7 @@ async function start() {
 }
 (async function init() {
   applyTheme();
+  if (localStorage.getItem("stopimg") === "1") $("#btn-stopimg").setAttribute("aria-pressed", "true");
   if (localStorage.getItem("mono") === "1") { $("#text").classList.add("mono"); $("#btn-orig").setAttribute("aria-pressed", "false"); }
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
   if (!st.auth) { showLogin(); return; }
