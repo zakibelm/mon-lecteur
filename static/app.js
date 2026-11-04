@@ -289,7 +289,7 @@ function closeBook() {
 async function openBook(id) {
   closeBook();
   st.book = await jget("/books/" + id);
-  st.lastPage = 0; trimCache(-100);
+  st.lastPage = 0; trimCache(-100); st.ahead = null; if (st.prepPlay) cancelPrepPlay();
   $("#book-title").textContent = st.book.title;
   $("#chk-translate").checked = !!st.book.translate;
   refreshPrep().catch(() => {});
@@ -316,22 +316,59 @@ function showPrep(p) {
   $("#btn-prep").textContent = p.running && p.whole ? "⏹ Arrêter la préparation" : "⚡ Préparer tout le livre à l'avance";
   $("#prep-pct").textContent = percent + " %";
   $("#prep-fill").style.width = percent + "%";
-  $("#prep-msg").textContent = `${p.ready} / ${p.total} passages prêts à l'écoute sans attente`
+  st.ahead = p.ahead; updateMiniPlayer();
+  $("#prep-msg").textContent = (p.ahead !== undefined ? `Réserve : ${p.ahead} passage${p.ahead > 1 ? "s" : ""} prêt${p.ahead > 1 ? "s" : ""} devant toi · ` : "")
+    + `${p.ready} / ${p.total} au total`
     + (p.paused ? ` — en pause : ${p.paused}` : p.current ? ` — passage ${p.current.idx + 1} en cours depuis ${p.current.seconds} s`
        : p.running ? (p.whole ? " — préparation en cours, même écran éteint ou app fermée" : " — les suivants se préparent") : "")
     + (p.running && st.book ? eta(st.book.id, p) : "")
     + (p.error ? ` — arrêtée : ${p.error}` : "");
   clearTimeout(st.prepPoll);
-  if (p.running && st.book && !$("#view-reader").hidden)
+  if (p.running && st.book && (st.playing || !$("#view-reader").hidden))     // aussi pendant l'écoute, sur tout onglet
     st.prepPoll = setTimeout(() => refreshPrep().catch(() => {}), 5000);
 }
-async function refreshPrep() { if (st.book) showPrep(await jget(`/books/${st.book.id}/prepare`)); }
+const posIdx = () => (st.cur >= 0 ? st.cur : (st.book ? st.book.progress_idx : 0));
+async function refreshPrep() { if (st.book) showPrep(await jget(`/books/${st.book.id}/prepare?from_idx=${posIdx()}`)); }
 $("#btn-prep").onclick = async () => {
   if (!st.book) return;
   const running = $("#btn-prep").textContent.startsWith("⏹");
-  try { showPrep(await jpost(`/books/${st.book.id}/prepare`, { stop: running })); }
+  try { showPrep(await jpost(`/books/${st.book.id}/prepare`, { stop: running, from_idx: posIdx() })); }
   catch (e) { $("#prep-msg").textContent = e.message; }
 };
+/* « Préparer et lire » : prépare dans l'ordre depuis la position, attend une petite réserve, puis lit pendant que
+   la suite continue de se préparer. Le lecteur audio reste actif pendant l'attente (lecture sans 2e appui). */
+$("#btn-prep-play").onclick = async () => {
+  if (!st.book) return;
+  if (st.prepPlay) { cancelPrepPlay(); return; }
+  unlockAudio();                                          // dans le geste : le son pourra partir tout seul
+  const from = posIdx(), translate = st.book.translate && st.book.lang !== "fr";
+  const want = translate ? 4 : 2;
+  st.prepPlay = true; $("#btn-prep-play").textContent = "✕ Annuler";
+  try {
+    let p = await jpost(`/books/${st.book.id}/prepare`, { from_idx: from });
+    showPrep(p);
+    for (;;) {
+      const need = Math.min(want, p.total - from);
+      note(`Préparation de la réserve : ${Math.min(p.ahead, need)}/${need} passage${need > 1 ? "s" : ""} — la lecture démarre dès qu'ils sont prêts`
+        + (p.paused ? ` (en pause : ${p.paused})` : ""));
+      st.waitMsg = p.paused ? "En pause : indexation en cours" : `Préparation ${Math.min(p.ahead, need)}/${need} · lecture dès que prêt`;
+      updateMiniPlayer();
+      if (p.ahead >= need || p.error) break;
+      await new Promise((r) => setTimeout(r, 2000));
+      if (!st.prepPlay) return;
+      p = await jget(`/books/${st.book.id}/prepare?from_idx=${from}`);
+      showPrep(p);
+    }
+    if (p.error) { note("Préparation arrêtée : " + p.error); return; }
+    updateStatus(); play(from);
+  } catch (e) { note(e.message); }
+  finally { st.prepPlay = false; st.waitMsg = ""; updateMiniPlayer(); $("#btn-prep-play").textContent = "▶ Préparer et lire"; }
+};
+function cancelPrepPlay() {
+  st.prepPlay = false; st.waitMsg = ""; updateMiniPlayer(); $("#btn-prep-play").textContent = "▶ Préparer et lire";
+  if (!st.playing) stopSound();
+  updateStatus();
+}
 
 function updateStatus() {
   const b = st.book;
@@ -430,7 +467,9 @@ function stopSound() { audio.pause(); speechSynthesis.cancel(); }
 function voiceLabel() {
   const s = st.segs[st.cur];
   if (!st.cfg || !st.cfg.server_audio) return "Voix de l'appareil";
-  const lang = s ? (s.translated ? "fr" : (s.lang && s.lang !== "und" ? s.lang : "fr")) : "fr";
+  // langue qui sera LUE : français si le passage est (ou sera) traduit, sinon sa propre langue
+  const willTranslate = s && st.book.translate && !["fr", "und"].includes(s.lang);
+  const lang = !s || s.translated || willTranslate || s.lang === "und" ? "fr" : s.lang;
   const names = VOICE_NAMES[lang];
   if (!names) return "Pas de voix serveur pour cette langue";
   const g = names[st.cfg.voice] ? st.cfg.voice : Object.keys(names)[0];
@@ -443,7 +482,10 @@ function updateMiniPlayer() {
   $("#btn-mp-speed").textContent = st.speed + "×";
   $("#btn-mp-voice").textContent = st.cfg && st.cfg.voice === "homme" ? "👨" : "👩";
   $("#btn-mp-voice").hidden = !(st.cfg && st.cfg.server_audio);
-  const sub = $("#mp-sub"); sub.replaceChildren(el("b", voiceLabel()), document.createTextNode(` · ${st.speed}×` + (s ? ` · ${st.cur + 1}/${st.segs.length}` : "")));
+  const sub = $("#mp-sub");
+  if (st.waitMsg) { sub.replaceChildren(el("b", st.waitMsg)); return; }       // « Préparer et lire » en attente
+  sub.replaceChildren(el("b", voiceLabel()), document.createTextNode(` · ${st.speed}×`
+    + (st.ahead !== undefined && st.ahead !== null ? ` · réserve ${st.ahead}` : s ? ` · ${st.cur + 1}/${st.segs.length}` : "")));
   const live = document.querySelector("#text .seg.active .live");
   if (live) { live.replaceChildren(); if (st.playing) live.append(el("span", undefined, "ping"), document.createTextNode("Lecture audio en cours")); }
 }
@@ -522,6 +564,7 @@ const unlockAudio = startFiller;
 function togglePlay() {
   if (!st.book) return;
   unlockAudio();
+  if (st.prepPlay) { cancelPrepPlay(); return; }
   if (st.playing) { st.playId++; st.playing = false; stopSound(); setPlayIcon(); return; }
   if (st.cfg.server_audio && audio.src && !isFiller() && !audio.ended && audio.currentTime > 0) {
     st.playing = true; setPlayIcon(); audio.play(); return;   // reprise exacte

@@ -592,6 +592,12 @@ def v22_tests(c):
                 break
             _pause(0.1)
         assert st_["ready"] == 5 and not st_["paused"], st_
+        # réserve : un trou dans la préparation l'interrompt
+        for f_ in (config.DATA_DIR / "books" / gid / "audio").glob("2-*.mp3"):
+            f_.unlink()
+        r_ = c.get(f"/api/books/{gid}/prepare", headers=H, params={"from_idx": 0}).json()
+        assert r_["ahead"] == 2 and r_["ready"] == 4, r_
+        print("✔ réserve : passages prêts d'affilée depuis la position de lecture (s'arrête au premier trou)")
         print("✔ priorité à la discussion : préparation en pause pendant l'indexation, reprise seule ensuite")
         # « Préparer tout le livre » sur le gros livre, depuis la position de lecture, puis arrêt
         tot = rag.progress(big)[1]
@@ -603,6 +609,9 @@ def v22_tests(c):
                 break
             _pause(0.1)
         assert st_["ready"] == tot and not st_["error"], st_
+        assert st_["ahead"] == tot - st_["from"], st_                  # réserve = tout ce qui reste
+        mid = c.get(f"/api/books/{big}/prepare", headers=H, params={"from_idx": tot - 3}).json()
+        assert mid["ahead"] == 3 and mid["from"] == tot - 3, mid
         r = c.post(f"/api/books/{big}/prepare", headers=H, json={"stop": True}).json()
         assert not r["running"], r
         print(f"✔ « Préparer tout le livre » : {tot}/{tot} passages prêts à l'écoute, arrêt possible")

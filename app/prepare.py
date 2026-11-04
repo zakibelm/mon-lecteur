@@ -146,8 +146,9 @@ class Preparer:
 preparer = Preparer()
 
 
-def status(book_id: str) -> dict:
-    """Passages prêts à l'écoute (traduction faite si nécessaire + audio de la voix actuelle)."""
+def status(book_id: str, from_idx: int | None = None) -> dict:
+    """Passages prêts à l'écoute (traduction faite si nécessaire + audio). `ahead` = passages prêts D'AFFILÉE à
+    partir de la position de lecture : c'est la réserve qui évite toute attente pendant l'écoute."""
     with db() as c:
         book = c.execute("SELECT * FROM books WHERE id=?", (book_id,)).fetchone()
         segs = c.execute("SELECT s.idx, s.text, s.lang, t.text AS tr FROM segments s LEFT JOIN translations t "
@@ -155,10 +156,15 @@ def status(book_id: str) -> dict:
     folder = config.DATA_DIR / "books" / book_id / "audio"
     with_audio = {int(p.name.split("-")[0]) for p in folder.glob("*.mp3")} if folder.exists() else set()
     server_audio = tts.get_provider().server_audio
-    ready = sum(1 for s in segs if (not reading.needs_translation(book, s) or s["tr"])
-                and (not server_audio or s["idx"] in with_audio))
+    ok = {s["idx"] for s in segs if (not reading.needs_translation(book, s) or s["tr"])
+          and (not server_audio or s["idx"] in with_audio)}
+    ready = len(ok)
+    pos = book["progress_idx"] if from_idx is None else max(0, from_idx)
+    ahead = 0
+    while pos + ahead in ok:
+        ahead += 1
     cur = preparer.current
-    out = {"ready": ready, "total": len(segs), "running": preparer.busy(book_id),
+    out = {"ready": ready, "total": len(segs), "ahead": ahead, "from": pos, "running": preparer.busy(book_id),
            "whole": book_id in preparer.whole, "error": preparer.errors.get(book_id, ""),
            "current": None, "paused": ""}
     if cur and cur[0] == book_id:

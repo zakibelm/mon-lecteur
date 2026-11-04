@@ -1,5 +1,5 @@
 // Service worker : met en cache la coquille de l'app (jamais l'API) pour un démarrage instantané.
-const CACHE = "lecteur-v11";   // changer à chaque mise à jour de la coquille (index/app.js/style)
+const CACHE = "lecteur-v12";   // changer à chaque mise à jour de la coquille (index/app.js/style)
 const SHELL = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest", "icon-192.png", "icon-512.png",
   "fonts/inter-normal-latin-ext.woff2", "fonts/inter-normal-latin.woff2", "fonts/merriweather-italic-latin-ext.woff2", "fonts/merriweather-italic-latin.woff2", "fonts/merriweather-normal-latin-ext.woff2", "fonts/merriweather-normal-latin.woff2"];
 

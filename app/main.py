@@ -83,6 +83,7 @@ class VocabIn(BaseModel):
 
 class Prepare(BaseModel):
     stop: bool = False
+    from_idx: int | None = Field(default=None, ge=0)     # position de lecture (sinon : progression enregistrée)
 
 
 class RoleTest(BaseModel):
@@ -266,18 +267,19 @@ def prepare_book(book_id: str, body: Prepare):
         book = _book_or_404(c, book_id)
     if book["status"] != "ready":
         raise HTTPException(409, "Le livre n'est pas prêt")
+    start = book["progress_idx"] if body.from_idx is None else max(0, body.from_idx)
     if body.stop:
         prepare.preparer.stop(book_id)
     else:
-        prepare.preparer.whole_book(book_id, book["progress_idx"])
-    return prepare.status(book_id)
+        prepare.preparer.whole_book(book_id, start)   # dans l'ordre, à partir de la position de lecture
+    return prepare.status(book_id, start)
 
 
 @app.get("/api/books/{book_id}/prepare", dependencies=[Depends(auth)])
-def prepare_status(book_id: str):
+def prepare_status(book_id: str, from_idx: int | None = None):
     with db() as c:
         _book_or_404(c, book_id)
-    return prepare.status(book_id)
+    return prepare.status(book_id, from_idx)
 
 
 @app.put("/api/books/{book_id}/progress", dependencies=[Depends(auth)])
