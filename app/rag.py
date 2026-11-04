@@ -1,5 +1,6 @@
 """Discussion avec le livre : embeddings + recherche par similarité + LLM (fournisseur choisi dans Réglages)."""
 import logging
+import threading
 
 import numpy as np
 
@@ -18,10 +19,48 @@ class StaleIndex(RuntimeError):
     """L'index a été construit avec un autre modèle d'embeddings : il faut réindexer."""
 
 
+_running: set[str] = set()
+_run_lock = threading.Lock()
+last_error: dict[str, str] = {}
+
+
+def is_running(book_id: str) -> bool:
+    return book_id in _running
+
+
+def progress(book_id: str) -> tuple[int, int]:
+    """(passages indexés, passages du livre)."""
+    with db() as c:
+        done = c.execute("SELECT COUNT(*) FROM embeddings WHERE book_id=?", (book_id,)).fetchone()[0]
+        total = c.execute("SELECT COUNT(*) FROM segments WHERE book_id=?", (book_id,)).fetchone()[0]
+    return done, total
+
+
 def index_book(book_id: str, batch: int = 16) -> None:
-    """Embeddings du texte ORIGINAL (un modèle multilingue comme bge-m3 gère la recherche inter-langues)."""
+    """Embeddings du texte ORIGINAL (un modèle multilingue comme bge-m3 gère la recherche inter-langues).
+    Reprend là où une indexation interrompue s'est arrêtée (redémarrage, panne d'Ollama) ; ne recommence de
+    zéro que si le modèle d'embeddings a changé. Une seule indexation à la fois par livre."""
+    with _run_lock:
+        if book_id in _running:
+            return
+        _running.add(book_id)
+    try:
+        _index(book_id, batch)
+        last_error.pop(book_id, None)
+    except Exception as e:
+        last_error[book_id] = str(e)[:200]
+        raise
+    finally:
+        _running.discard(book_id)
+
+
+def _index(book_id: str, batch: int) -> None:
     client, model, label = settings.client_for("embed")
     with db() as c:
+        sig = c.execute("SELECT embed_sig FROM books WHERE id=?", (book_id,)).fetchone()["embed_sig"]
+        if sig != label:                     # autre modèle (ou jamais indexé) : on repart de zéro
+            c.execute("DELETE FROM embeddings WHERE book_id=?", (book_id,))
+            c.execute("UPDATE books SET indexed=0, embed_sig=? WHERE id=?", (label, book_id))
         rows = c.execute(
             "SELECT idx, text FROM segments WHERE book_id=? AND idx NOT IN "
             "(SELECT idx FROM embeddings WHERE book_id=?) ORDER BY idx", (book_id, book_id)).fetchall()

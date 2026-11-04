@@ -69,6 +69,8 @@ get_voice() {   # get_voice <chemin-dépôt> <nom>
 get_voice fr/fr_FR/siwis/medium fr_FR-siwis-medium || fail "Voix française indisponible (réseau ou URL)."
 get_voice en/en_US/lessac/medium en_US-lessac-medium || warn "Voix anglaise non téléchargée : l'import d'un livre en anglais échouera à l'écoute."
 get_voice ar/ar_JO/kareem/medium ar_JO-kareem-medium || warn "Voix arabe non téléchargée : l'import d'un livre en arabe échouera à l'écoute."
+get_voice fr/fr_FR/tom/medium fr_FR-tom-medium || warn "Voix française d'homme non téléchargée : la voix de femme sera utilisée."
+get_voice en/en_US/ryan/medium en_US-ryan-medium || warn "Voix anglaise d'homme non téléchargée : la voix de femme sera utilisée."
 
 say "6. Configuration (.env)"
 if [ ! -f .env ]; then

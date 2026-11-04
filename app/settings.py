@@ -48,6 +48,7 @@ def _defaults() -> dict:
     return {
         "allow_paid": False,
         "auto_translate": True,      # valeur proposée pour les nouveaux livres
+        "voice": "femme",            # timbre de lecture : femme | homme
         "providers": {
             "ollama": {"base_url": config.LLM_BASE_URL, "api_key": _enc(config.LLM_API_KEY)},
             "openrouter": {"api_key": ""},
@@ -72,6 +73,8 @@ def load() -> dict:
             saved = {}
         base["allow_paid"] = bool(saved.get("allow_paid", False))
         base["auto_translate"] = bool(saved.get("auto_translate", True))
+        if saved.get("voice") in config.VOICE_GENDERS:
+            base["voice"] = saved["voice"]
         for p, v in (saved.get("providers") or {}).items():
             if p in base["providers"] and isinstance(v, dict):
                 base["providers"][p].update({k: v[k] for k in ("base_url", "api_key") if k in v})
@@ -96,7 +99,7 @@ def public_view() -> dict:
                        "has_key": bool(key) and not (name == "ollama" and key == config.LLM_API_KEY),
                        "key_hint": f"…{key[-4:]}" if len(key) >= 8 else ""}
     provs["openrouter"]["base_url"] = config.OPENROUTER_BASE_URL     # fixe : non modifiable
-    return {"allow_paid": s["allow_paid"], "auto_translate": s["auto_translate"],
+    return {"allow_paid": s["allow_paid"], "auto_translate": s["auto_translate"], "voice": s["voice"],
             "providers": provs, "roles": s["roles"], "role_labels": ROLE_LABELS}
 
 
@@ -200,6 +203,10 @@ def update(patch: dict) -> dict:
             s["allow_paid"] = bool(patch["allow_paid"])
         if "auto_translate" in patch:
             s["auto_translate"] = bool(patch["auto_translate"])
+        if "voice" in patch:
+            if patch["voice"] not in config.VOICE_GENDERS:
+                raise ValueError("voix inconnue : femme ou homme")
+            s["voice"] = patch["voice"]
         for name, v in (patch.get("providers") or {}).items():
             if name not in PROVIDERS or not isinstance(v, dict):
                 raise ValueError(f"fournisseur inconnu : {name}")

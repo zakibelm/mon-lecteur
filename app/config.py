@@ -17,11 +17,20 @@ OCR_PACKS = {"zh": "chi_sim+eng", "zh-tw": "chi_tra+eng", "ja": "jpn+eng", "ko":
 # --- TTS : "browser" (voix de l'appareil, 0 serveur) ou "piper" (voix neuronale locale) ---
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "browser")
 PIPER_CMD = os.getenv("PIPER_CMD", "piper")
+VOICES_DIR = Path(__file__).resolve().parent.parent / "voices"
+
+
+def _voice(env: str, name: str) -> str:
+    return os.getenv(env, str(VOICES_DIR / f"{name}.onnx"))
+
+
+# Voix par langue et par timbre. L'arabe n'existe chez Piper qu'en voix d'homme (ar_JO-kareem).
 PIPER_VOICES = {
-    "fr": os.getenv("PIPER_VOICE_FR", "voices/fr_FR-siwis-medium.onnx"),
-    "en": os.getenv("PIPER_VOICE_EN", "voices/en_US-lessac-medium.onnx"),
-    "ar": os.getenv("PIPER_VOICE_AR", "voices/ar_JO-kareem-medium.onnx"),
+    "fr": {"femme": _voice("PIPER_VOICE_FR", "fr_FR-siwis-medium"), "homme": _voice("PIPER_VOICE_FR_HOMME", "fr_FR-tom-medium")},
+    "en": {"femme": _voice("PIPER_VOICE_EN", "en_US-lessac-medium"), "homme": _voice("PIPER_VOICE_EN_HOMME", "en_US-ryan-medium")},
+    "ar": {"homme": _voice("PIPER_VOICE_AR", "ar_JO-kareem-medium")},
 }
+VOICE_GENDERS = ("femme", "homme")
 
 # --- LLM : valeurs PAR DÉFAUT (modifiables ensuite dans la page Réglages de l'application) ---
 # Passerelles : ollama (local, VPS), openrouter (clé API), omniroute (ta passerelle).

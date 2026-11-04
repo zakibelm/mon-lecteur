@@ -303,12 +303,16 @@ function trimCache(idx) {                       // garde peu de blobs en mémoir
   }
 }
 function stopSound() { audio.pause(); speechSynthesis.cancel(); }
-function setPlayIcon() { $("#btn-play").textContent = st.playing ? "⏸" : "▶️"; }
+function setPlayIcon() {
+  $("#btn-play").textContent = st.playing ? "⏸" : "▶️";
+  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = st.playing ? "playing" : "paused";
+}
 
 async function play(idx) {
   if (!st.book || idx < 0 || idx >= st.segs.length) return;
   const id = ++st.playId;
-  stopSound();
+  speechSynthesis.cancel();
+  if (st.cfg.server_audio) startFiller(); else audio.pause();      // jamais de silence entre deux passages
   st.playing = true; setPlayIcon(); highlight(idx);
   try {
     const pending = st.segs[idx].pending;
@@ -322,16 +326,16 @@ async function play(idx) {
       const slow = setTimeout(() => { if (id === st.playId) note("Préparation de l'audio…"); }, 600);
       const url = await audioUrl(idx).finally(() => clearTimeout(slow));
       if (id !== st.playId) return;
-      audio.src = url; audio.playbackRate = st.speed;
+      audio.loop = false; audio.src = url; audio.playbackRate = st.speed;
       try { await audio.play(); }
       catch (e) {
         if (e.name !== "NotAllowedError") throw e;
-        st.playing = false; setPlayIcon(); st.unlocked = false;
+        st.playing = false; setPlayIcon();
         note("Le navigateur a bloqué le son : appuie de nouveau sur ▶️ (l'audio est prêt).");
         return;
       }
       if (!info.error) updateStatus();
-      audioUrl(idx + 1).catch(() => {}); audioUrl(idx + 2).catch(() => {});   // préchargement
+      for (const k of [1, 2, 3]) audioUrl(idx + k).catch(() => {});         // 3 passages d'avance
       trimCache(idx);
     } else {                                    // voix de l'appareil, aucun audio serveur
       const u = new SpeechSynthesisUtterance(info.text);
@@ -345,25 +349,35 @@ async function play(idx) {
     }
   } catch (e) {
     if (e.name === "AbortError" || id !== st.playId) return;
-    st.playing = false; setPlayIcon(); note(e.message);
+    st.playing = false; setPlayIcon(); stopSound(); note(e.message);
   }
 }
-// Son muet de 0,05 s : joué PENDANT l'appui, il autorise ce lecteur audio pour la suite (Safari/iOS refuse
-// sinon un play() lancé après plusieurs secondes de traduction ou de synthèse).
-const SILENCE = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=";
-function unlockAudio() {
-  if (!st.cfg || !st.cfg.server_audio || st.unlocked) return;
-  st.unlocked = true; st.unlocking = true;
-  audio.src = SILENCE;
+// Son de remplissage : 25 Hz à -50 dB (inaudible sur un haut-parleur de téléphone), joué en boucle
+// 1) PENDANT l'appui : il autorise ce lecteur audio pour la suite (Safari/iOS refuse sinon un play() tardif) ;
+// 2) ENTRE deux passages (synthèse/traduction du suivant) : la lecture ne s'interrompt jamais, donc Android/iOS
+//    ne mettent pas l'app en sommeil écran éteint. Seul ⏸ (ici ou sur l'écran verrouillé) arrête la lecture.
+const FILLER = (() => {
+  const rate = 8000, n = rate, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const w = (o, t) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVEfmt "); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) v.setInt16(44 + i * 2, Math.round(100 * Math.sin((2 * Math.PI * 25 * i) / rate)), true);
+  return URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+})();
+const isFiller = () => audio.src === FILLER;
+function startFiller() {        // à appeler dans le geste (déverrouillage) et entre deux passages
+  if (!st.cfg || !st.cfg.server_audio) return;
+  if (!isFiller()) { audio.loop = true; audio.src = FILLER; }
   const p = audio.play();
-  const done = () => { st.unlocking = false; };
-  if (p && p.then) p.then(() => { if (audio.src === SILENCE) audio.pause(); done(); }, () => { st.unlocked = false; done(); }); else done();
+  if (p && p.catch) p.catch(() => {});
 }
+const unlockAudio = startFiller;
 function togglePlay() {
   if (!st.book) return;
   unlockAudio();
   if (st.playing) { st.playId++; st.playing = false; stopSound(); setPlayIcon(); return; }
-  if (st.cfg.server_audio && audio.src && !audio.ended && audio.currentTime > 0) {
+  if (st.cfg.server_audio && audio.src && !isFiller() && !audio.ended && audio.currentTime > 0) {
     st.playing = true; setPlayIcon(); audio.play(); return;   // reprise exacte
   }
   play(st.cur >= 0 ? st.cur : 0);
@@ -375,13 +389,15 @@ function next() {
     setTimeout(() => { if (st.playing && id === st.playId) next(); }, 2000);
     return;
   }
-  st.playing = false; setPlayIcon();
+  st.playing = false; setPlayIcon(); stopSound();
 }
 const prev = () => play(Math.max(0, st.cur - 1));
 
 function setupMediaSession() {                  // boutons écran verrouillé / casque
   if (!("mediaSession" in navigator)) return;
-  navigator.mediaSession.metadata = new MediaMetadata({ title: st.book.title, artist: "Lecteur de livres" });
+  navigator.mediaSession.metadata = new MediaMetadata({ title: st.book.title, artist: "Lecteur de livres",
+    artwork: [{ src: "icon-512.png", sizes: "512x512", type: "image/png" }] });
+  navigator.mediaSession.setActionHandler("stop", () => { if (st.playing) togglePlay(); });
   navigator.mediaSession.setActionHandler("play", () => { if (!st.playing) togglePlay(); });
   navigator.mediaSession.setActionHandler("pause", () => { if (st.playing) togglePlay(); });
   navigator.mediaSession.setActionHandler("nexttrack", next);
@@ -414,12 +430,12 @@ $("#chat-form").onsubmit = async (ev) => {
     bubble.textContent = e.message;
     if (e.status === 409 && /indexation|index/i.test(e.message) && st.book.status === "ready") {
       const b = el("button", "⟳ Réindexer ce livre", "src");
-      b.onclick = () => reindexBook().then(() => (bubble.textContent = "Réindexation lancée : réessaie dans un instant."));
+      b.onclick = () => reindexBook().then((r) => (bubble.textContent = `Indexation en cours (${r.done}/${r.total} passages déjà prêts) : réessaie dans quelques minutes.`), (e) => (bubble.textContent = e.message));
       bubble.append(el("br"), b);
     }
   }
 };
-async function reindexBook() { await jpost(`/books/${st.book.id}/reindex`); }
+async function reindexBook() { return jpost(`/books/${st.book.id}/reindex`); }
 
 /* ---------- Options du livre (traduction) ---------- */
 $("#btn-orig").onclick = () => $("#text").classList.toggle("show-orig");
@@ -444,7 +460,7 @@ async function retranslate(idx) {
 }
 $("#btn-retr").onclick = () => st.cur >= 0 && retranslate(st.cur);
 $("#btn-retr-all").onclick = () => confirm("Effacer toutes les traductions de ce livre ?") && retranslate(null);
-$("#btn-reindex").onclick = () => reindexBook().then(() => note("Réindexation lancée."), (e) => note(e.message));
+$("#btn-reindex").onclick = () => reindexBook().then((r) => note(`Indexation en cours : ${r.done}/${r.total} passages prêts.`), (e) => note(e.message));
 
 /* ---------- Réglages ---------- */
 const PROV_LABEL = { ollama: "Ollama (local, sur le VPS)", openrouter: "OpenRouter", omniroute: "OmniRoute" };
@@ -615,6 +631,15 @@ $("#settings-form").onsubmit = (ev) => { ev.preventDefault(); saveSettings(false
 /* ---------- Câblage ---------- */
 for (const t of document.querySelectorAll(".tab")) t.onclick = () => showView(t.dataset.view);
 $("#btn-play").onclick = togglePlay;
+$("#voice").onchange = async (e) => {
+  try { await jpost("/settings", { voice: e.target.value }, "PUT"); }
+  catch (err) { note(err.message); return; }
+  st.cfg.voice = e.target.value;
+  for (const [, p] of st.cache) p.then((u) => u && URL.revokeObjectURL(u)).catch(() => {});
+  st.cache.clear();                                     // les passages préparés l'étaient avec l'autre voix
+  if (st.book && st.book.lang === "ar" && e.target.value === "femme") note("Arabe : seule une voix d'homme existe.");
+  if (st.playing) { unlockAudio(); play(st.cur); }
+};
 $("#btn-next").onclick = () => { unlockAudio(); next(); };
 $("#btn-prev").onclick = () => { unlockAudio(); prev(); };
 $("#speed").onchange = (e) => {
@@ -626,7 +651,9 @@ $("#btn-theme").onclick = () => {
   const dark = !document.documentElement.classList.contains("dark");
   localStorage.setItem("dark", dark ? "1" : "0"); applyTheme();
 };
-audio.onended = () => { if (!st.unlocking && audio.src !== SILENCE) next(); };
+audio.onended = () => { if (!isFiller()) next(); };
+// pause imposée par le système (appel, autre app audio) : on reflète l'état au lieu de croire que ça joue encore
+audio.onpause = () => { if (st.playing && !isFiller() && !audio.ended && audio.currentTime < audio.duration) { st.playing = false; setPlayIcon(); } };
 
 (async function init() {
   applyTheme();
@@ -634,6 +661,8 @@ audio.onended = () => { if (!st.unlocking && audio.src !== SILENCE) next(); };
   try {
     st.cfg = await jget("/config");
     updateFileInfo();
+    $("#voice").value = st.cfg.voice || "femme";
+    $("#voice").hidden = !st.cfg.server_audio;
     jget("/books").then(fillBookPick).catch(() => {});
     for (const [code, label] of Object.entries(st.cfg.upload_langs)) {
       const o = el("option", label); o.value = code; $("#lang").append(o);

@@ -4,6 +4,7 @@ import logging
 import re
 import secrets
 import shutil
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,6 +17,7 @@ from pydantic import BaseModel, Field
 from . import config, db as database, detect, extract, rag, reading, settings
 from .db import db
 from .llm import LLMError
+from . import tts
 from .tts import get_provider
 
 log = logging.getLogger("lecteur")
@@ -34,7 +36,17 @@ async def lifespan(_: FastAPI):
     with db() as c:      # un redémarrage tue les tâches de fond : on ne laisse pas de livre « en cours » fantôme
         c.execute("UPDATE books SET status='error', error=? WHERE status='processing'",
                   ("Traitement interrompu par un redémarrage : réimporte le livre",))
+    threading.Thread(target=_resume_indexing, name="reprise-index", daemon=True).start()
     yield
+
+
+def _resume_indexing() -> None:
+    """Au démarrage : termine les index de discussion interrompus (ex. redémarrage pendant l'indexation)."""
+    with db() as c:
+        ids = [r["id"] for r in c.execute("SELECT id FROM books WHERE status='ready' AND indexed=0 ORDER BY created_at")]
+    for book_id in ids:
+        log.info("Reprise de l'indexation de %s", book_id)
+        _index_quietly(book_id)
 
 
 app = FastAPI(title="Lecteur de livres audio", lifespan=lifespan)
@@ -130,6 +142,8 @@ def _index_quietly(book_id: str) -> None:
 def get_config():
     p = get_provider()
     return {"tts": p.name, "server_audio": p.server_audio, "voice_langs": list(config.PIPER_VOICES),
+            "voices": {lg: tts.available_genders(lg) for lg in config.PIPER_VOICES},
+            "voice": settings.load()["voice"],
             "upload_langs": UPLOAD_LANGS, "auto_translate": settings.load()["auto_translate"],
             "max_upload_mb": config.MAX_UPLOAD_MB}
 
@@ -234,12 +248,14 @@ def get_audio(book_id: str, idx: int):
     if voice not in config.PIPER_VOICES:
         raise HTTPException(422, f"Pas de voix serveur pour « {voice} » : active la traduction vers le français "
                                  "ou lis avec la voix de l'appareil")
-    key = hashlib.sha1(f"{voice}|{res['text']}".encode()).hexdigest()[:10]   # nouveau texte → nouveau fichier
+    gender = settings.load()["voice"]
+    model = tts.voice_path(voice, gender)
+    key = hashlib.sha1(f"{model}|{res['text']}".encode()).hexdigest()[:10]   # autre texte ou autre voix → autre fichier
     path = config.DATA_DIR / "books" / book_id / "audio" / f"{idx}-{key}.mp3"
     if not path.exists():                          # génération à la demande puis cache disque
         path.parent.mkdir(exist_ok=True)
         try:
-            provider.synthesize(res["text"], voice, path)
+            provider.synthesize(res["text"], voice, path, gender)
         except Exception:
             log.exception("TTS en échec (%s #%s)", book_id, idx)
             raise HTTPException(500, "Échec de la synthèse vocale")
@@ -259,8 +275,17 @@ def chat(book_id: str, body: Question):
     with db() as c:
         book = _book_or_404(c, book_id)
     if not book["indexed"]:
-        raise HTTPException(409, "Discussion indisponible : livre pas encore indexé "
-                                 "(traitement en cours, ou modèle d'embeddings injoignable — voir Réglages)")
+        done, total = rag.progress(book_id)
+        if book["status"] == "processing":
+            msg = "Discussion indisponible : extraction du livre en cours, l'indexation suivra."
+        elif rag.is_running(book_id):
+            msg = (f"Indexation en cours : {done}/{total} passages ({100 * done // max(1, total)} %). "
+                   "Réessaie dans quelques minutes.")
+        else:
+            err = rag.last_error.get(book_id)
+            msg = (f"Index incomplet ({done}/{total} passages)"
+                   + (f" — dernière erreur : {err}" if err else "") + ". Appuie sur « Réindexer » pour reprendre.")
+        raise HTTPException(409, msg)
     try:
         return rag.answer(book_id, body.question)
     except rag.StaleIndex as e:
@@ -305,9 +330,13 @@ def reindex(book_id: str, background: BackgroundTasks):
         book = _book_or_404(c, book_id)
     if book["status"] != "ready":
         raise HTTPException(409, "Le livre n'est pas prêt")
-    rag.reset_index(book_id)
-    background.add_task(_index_quietly, book_id)
-    return {"ok": True}
+    # reprend là où l'index s'est arrêté ; repart de zéro seulement si le modèle d'embeddings a changé
+    with db() as c:
+        c.execute("UPDATE books SET indexed=0 WHERE id=? AND embed_sig != ?", (book_id, settings.embed_signature()))
+    if not rag.is_running(book_id):
+        background.add_task(_index_quietly, book_id)
+    done, total = rag.progress(book_id)
+    return {"ok": True, "done": done, "total": total, "running": True}
 
 
 # ---------- Réglages & fournisseurs LLM ----------

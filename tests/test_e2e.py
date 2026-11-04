@@ -20,7 +20,8 @@ TOKEN = "Tk9pQ2fL8vB1nZ4yW7sR0eA5uH3jD6mXq"      # >= 32 caractères (exigé par
 
 # ---------- LLM simulé (API compatible OpenAI) ----------
 TR_CALLS: list[tuple[str, str]] = []          # (fournisseur, texte) pour chaque traduction demandée
-AUTH_SEEN: list[tuple[str, str]] = []         # (préfixe de chemin, en-tête Authorization)
+AUTH_SEEN: list[tuple[str, str]] = []
+EMB_TEXTS: list[str] = []                    # textes envoyés au modèle d'embeddings         # (préfixe de chemin, en-tête Authorization)
 
 
 def _tag(path: str) -> str:
@@ -53,6 +54,9 @@ class FakeLLM(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         AUTH_SEEN.append((self.path, self.headers.get("Authorization", "")))
         if self.path.endswith("/embeddings"):
+            EMB_TEXTS.extend(body["input"])
+            if os.environ.get("EMB_FAIL"):
+                return self._send({"error": "panne simulée"}, 500)
             data = []
             for i, text in enumerate(body["input"]):
                 v = [0.0] * 64
@@ -78,6 +82,7 @@ fake_piper = TMP / "piper"
 fake_piper.write_text(
     "#!/usr/bin/env python3\nimport sys, wave\n"
     "out = sys.argv[sys.argv.index('-f') + 1]\nsys.stdin.read()\n"
+    f"open({str(TMP / 'piper_models.log')!r}, 'a').write(sys.argv[sys.argv.index('-m') + 1] + '\\n')\n"
     "w = wave.open(out, 'wb'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(22050)\n"
     "w.writeframes(b'\\x00\\x00' * 11025); w.close()\n")
 fake_piper.chmod(fake_piper.stat().st_mode | stat.S_IEXEC)
@@ -435,6 +440,39 @@ def v22_tests(c):
     assert c.post(f"/api/books/{fr}/chat", headers=H, json={"question": "galaxie Andromède"}).status_code == 200
     print("✔ embeddings changés → 409 clair → réindexation → chat de nouveau opérationnel")
 
+    # --- indexation interrompue (redémarrage pendant l'indexation d'un gros livre) : reprise sans tout refaire ---
+    import app.main as main_mod
+    from app import rag
+    long = "\n\n".join(f"Paragraphe numéro {i} du gros livre, avec assez de mots pour être un passage." for i in range(40))
+    doc = fitz.open(); doc.new_page().insert_textbox(fitz.Rect(30, 30, 580, 820), long, fontsize=7)
+    big = upload(c, doc.tobytes(), "gros.pdf")
+    done, total = rag.progress(big)
+    assert total >= 10 and done == total, (done, total)
+    with database.db() as cx:                      # état après coupure : 3 passages indexés sur N, indexed=0
+        cx.execute("DELETE FROM embeddings WHERE book_id=? AND idx>=3", (big,))
+        cx.execute("UPDATE books SET indexed=0 WHERE id=?", (big,))
+    r = c.post(f"/api/books/{big}/chat", headers=H, json={"question": "paragraphe"})
+    assert r.status_code == 409 and f"3/{total}" in r.json()["detail"] and "Réindexer" in r.json()["detail"], r.text
+    EMB_TEXTS.clear()
+    main_mod._resume_indexing()                    # ce que fait le démarrage du service
+    assert rag.progress(big) == (total, total), rag.progress(big)
+    assert len(EMB_TEXTS) == total - 3, f"{len(EMB_TEXTS)} textes recalculés au lieu de {total - 3}"
+    assert c.post(f"/api/books/{big}/chat", headers=H, json={"question": "paragraphe"}).status_code == 200
+    # panne d'embeddings pendant l'indexation : message avec l'erreur, puis « Réindexer » reprend
+    with database.db() as cx:
+        cx.execute("DELETE FROM embeddings WHERE book_id=? AND idx>=5", (big,))
+        cx.execute("UPDATE books SET indexed=0 WHERE id=?", (big,))
+    os.environ["EMB_FAIL"] = "1"
+    main_mod._index_quietly(big)
+    r = c.post(f"/api/books/{big}/chat", headers=H, json={"question": "paragraphe"})
+    assert r.status_code == 409 and "dernière erreur" in r.json()["detail"] and f"5/{total}" in r.json()["detail"], r.text
+    del os.environ["EMB_FAIL"]
+    EMB_TEXTS.clear()
+    rr = c.post(f"/api/books/{big}/reindex", headers=H).json()
+    assert rr["ok"] and rag.progress(big) == (total, total) and len(EMB_TEXTS) == total - 5, (rr, len(EMB_TEXTS))
+    assert c.post(f"/api/books/{big}/chat", headers=H, json={"question": "paragraphe"}).status_code == 200
+    print(f"✔ indexation interrompue : reprise au démarrage et par « Réindexer » sans tout refaire ({total} passages)")
+
     # --- suppression : tout est nettoyé ---
     assert c.delete(f"/api/books/{zh}", headers=H).status_code == 200
     with database.db() as cx:
@@ -478,6 +516,24 @@ def main():
         assert len(cached) == 1 and cached[0].exists()
         assert c.get(f"/api/books/{bid}/segments/999/audio", headers=H).status_code == 404
         print("✔ audio : navigateur (204) et Piper (MP3 + cache)")
+
+        # --- voix femme / homme : modèle Piper différent, fichiers audio distincts, arabe en voix d'homme ---
+        log = TMP / "piper_models.log"
+        cf = c.get("/api/config", headers=H).json()
+        assert cf["voice"] == "femme" and cf["voices"]["fr"] == ["femme", "homme"] and cf["voices"]["ar"] == ["homme"], cf
+        assert c.put("/api/settings", headers=H, json={"voice": "robot"}).status_code == 400
+        assert c.put("/api/settings", headers=H, json={"voice": "homme"}).json()["voice"] == "homme"
+        assert c.get(f"/api/books/{bid}/segments/0/audio", headers=H).status_code == 200
+        assert log.read_text().splitlines()[-1].endswith("fr_FR-tom-medium.onnx"), log.read_text()
+        assert len(list((config.DATA_DIR / "books" / bid / "audio").glob("0-*.mp3"))) == 2, "1 fichier par voix"
+        c.put("/api/settings", headers=H, json={"voice": "femme"})
+        n = len(log.read_text().splitlines())
+        assert c.get(f"/api/books/{bid}/segments/0/audio", headers=H).status_code == 200
+        assert len(log.read_text().splitlines()) == n, "voix de femme déjà en cache : pas de nouvelle synthèse"
+        from app import tts as tts_mod
+        assert tts_mod.voice_path("ar", "femme").endswith("ar_JO-kareem-medium.onnx")
+        assert tts_mod.voice_path("xx", "homme").endswith("fr_FR-tom-medium.onnx")
+        print("✔ voix femme / homme : modèle Piper choisi, un fichier audio par voix, arabe → voix d'homme")
 
         # --- progression ---
         assert c.put(f"/api/books/{bid}/progress", headers=H, json={"idx": 2}).status_code == 200

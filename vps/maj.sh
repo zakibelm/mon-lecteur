@@ -32,6 +32,19 @@ tar -czf "/root/lecteur-code-avant-$STAMP.tgz" -C "$APP" --exclude=data --exclud
 git -C "$SRC" archive HEAD | tar -x -C "$APP"
 chown -R lecteur:lecteur "$APP"
 ok "code copié (ancien code sauvegardé : /root/lecteur-code-avant-$STAMP.tgz)"
+echo "--- 1b. Voix Piper manquantes (homme fr/en)"
+VB=https://huggingface.co/rhasspy/piper-voices/resolve/main
+for v in fr/fr_FR/tom/medium/fr_FR-tom-medium en/en_US/ryan/medium/en_US-ryan-medium; do
+  n="${v##*/}"
+  for e in onnx onnx.json; do
+    f="$APP/voices/$n.$e"
+    [ -s "$f" ] || { runuser -u lecteur -- curl -fL --retry 3 -sS -o "$f.part" "$VB/$v.$e" && mv "$f.part" "$f"; } \
+      || printf '⚠ %s non téléchargée (la voix de femme sera utilisée)\n' "$n.$e"
+  done
+  [ "$(stat -c %s "$APP/voices/$n.onnx" 2>/dev/null || echo 0)" -gt 1000000 ] && ok "voix $n présente" \
+    || { rm -f "$APP/voices/$n.onnx"; printf '⚠ voix %s absente\n' "$n"; }
+done
+chown -R lecteur:lecteur "$APP/voices"
 (cd "$APP" && runuser -u lecteur -- venv/bin/python tests/test_e2e.py 2>/dev/null | grep -E "TOUS LES TESTS PASSENT") \
   || { tar -xzf "/root/lecteur-code-avant-$STAMP.tgz" -C "$APP"; fail "tests en échec : ancien code remis, service NON redémarré."; }
 

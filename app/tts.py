@@ -13,7 +13,7 @@ class TTSProvider(ABC):
     server_audio: bool          # False = l'appareil lit le texte lui-même
 
     @abstractmethod
-    def synthesize(self, text: str, lang: str, out_path: Path) -> None: ...
+    def synthesize(self, text: str, lang: str, out_path: Path, gender: str = "femme") -> None: ...
 
 
 class BrowserProvider(TTSProvider):
@@ -21,7 +21,7 @@ class BrowserProvider(TTSProvider):
     name = "browser"
     server_audio = False
 
-    def synthesize(self, text, lang, out_path):
+    def synthesize(self, text, lang, out_path, gender="femme"):
         raise NotImplementedError
 
 
@@ -31,8 +31,8 @@ class PiperProvider(TTSProvider):
     server_audio = True
     _lock = threading.Lock()    # Piper est lancé une fois à la fois (ménage le CPU du VPS)
 
-    def synthesize(self, text, lang, out_path):
-        model = config.PIPER_VOICES.get(lang) or config.PIPER_VOICES["fr"]
+    def synthesize(self, text, lang, out_path, gender="femme"):
+        model = voice_path(lang, gender)
         text = " ".join(text.split())
         wav = out_path.with_suffix(".wav")
         part = out_path.with_suffix(".part")
@@ -50,6 +50,21 @@ class PiperProvider(TTSProvider):
             )
             wav.unlink(missing_ok=True)
             os.replace(part, out_path)       # écriture atomique : jamais de fichier à moitié écrit
+
+
+def available_genders(lang: str) -> list[str]:
+    """Timbres dont le fichier de voix est présent (si aucun ne l'est, ceux déclarés : tests, installation en cours)."""
+    voices = config.PIPER_VOICES.get(lang) or {}
+    present = [g for g in config.VOICE_GENDERS if g in voices and Path(voices[g]).exists()]
+    return present or [g for g in config.VOICE_GENDERS if g in voices]
+
+
+def voice_path(lang: str, gender: str) -> str:
+    """Voix demandée si elle existe pour cette langue, sinon l'autre timbre (ex. arabe : voix d'homme seulement)."""
+    if lang not in config.PIPER_VOICES:
+        lang = "fr"
+    genders = available_genders(lang)
+    return config.PIPER_VOICES[lang][gender if gender in genders else genders[0]]
 
 
 _PROVIDERS = {"browser": BrowserProvider, "piper": PiperProvider}
