@@ -519,13 +519,15 @@ def v22_tests(c):
     for i, t in enumerate(zh5):
         pg.insert_textbox(fitz.Rect(50, 50 + i * 60, 550, 100 + i * 60), t, fontsize=14, fontname="china-s")
     gid = upload(c, doc.tobytes(), "zh5.pdf")
+    assert reading.BATCH_MAX == 1, "1 passage par demande par défaut (mesuré le plus stable sur CPU)"
+    reading.BATCH_MAX = 3                          # regroupement testé tel qu'activé avec TRANSLATE_BATCH=3
     segs = c.get(f"/api/books/{gid}/segments", headers=H).json()
     assert [x["original"] for x in segs] == zh5, [x["original"] for x in segs]
     n0 = len(TR_CALLS)
     r0 = c.get(f"/api/books/{gid}/segments/0/read", headers=H).json()
     assert r0["translated"] and r0["text"] == f"FR: {zh5[0]}", r0
     assert len(TR_CALLS) == n0 + 1, f"{len(TR_CALLS) - n0} appels au lieu d'1"
-    assert reading.BATCH_MAX == 3 and TR_CALLS[-1][1].count("[") == 3, "groupes de 3 passages par défaut"
+    assert TR_CALLS[-1][1].count("[") == 3, "groupes de 3 passages (TRANSLATE_BATCH=3)"
     mt = BATCH_BODIES[-1].get("max_tokens")
     assert mt and mt < 400, f"plafond de réponse absent ou trop haut : {mt}"
     for i in range(1, 5):
@@ -556,8 +558,8 @@ def v22_tests(c):
         r1 = c.get(f"/api/books/{gid}/segments/1/read", headers=H).json()
         assert r1["translated"] and len(BATCH_BODIES) == nb + 1, "après un échec, ce livre ne tente plus de groupe"
     finally:
-        tr_mod.BATCH_TIMEOUT = old_to; del os.environ["BATCH_SLOW"]; reading._no_batch.clear()
-    print(f"✔ traduction par paragraphe : groupes de 3 (plafond {mt} jetons), mal numéroté ou trop lent "
+        tr_mod.BATCH_TIMEOUT = old_to; del os.environ["BATCH_SLOW"]; reading._no_batch.clear(); reading.BATCH_MAX = 1
+    print(f"✔ traduction : 1 passage par demande par défaut ; TRANSLATE_BATCH=3 → groupes de 3 (plafond {mt} jetons), mal numéroté ou trop lent "
           f"({el:.1f} s, sans relance) → passage par passage")
 
     # --- préparation en avance (traduction + audio) côté serveur ---

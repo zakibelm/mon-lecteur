@@ -52,8 +52,9 @@ function showView(name) {
   $("#lib-search").hidden = name !== "library" || !st.searchOpen;
   window.scrollTo({ top: 0 });
 }
-function applyTheme() {                    // Nocturne (sombre) par défaut, « Papier chaud » au choix
-  const dark = localStorage.getItem("dark") !== "0";
+function applyTheme() {                    // choix enregistré, sinon réglage clair/sombre du téléphone
+  const saved = localStorage.getItem("dark");
+  const dark = saved === null ? matchMedia("(prefers-color-scheme: dark)").matches : saved === "1";
   document.documentElement.classList.toggle("dark", dark);
   document.querySelector('meta[name="theme-color"]').content = dark ? "#121316" : "#f7f3ec";
 }
@@ -439,6 +440,9 @@ function updateMiniPlayer() {
   if (!st.book) return;
   const s = st.segs[st.cur];
   $("#mp-title").textContent = st.book.title + (s ? ` · p.${s.page}` : "");
+  $("#btn-mp-speed").textContent = st.speed + "×";
+  $("#btn-mp-voice").textContent = st.cfg && st.cfg.voice === "homme" ? "👨" : "👩";
+  $("#btn-mp-voice").hidden = !(st.cfg && st.cfg.server_audio);
   const sub = $("#mp-sub"); sub.replaceChildren(el("b", voiceLabel()), document.createTextNode(` · ${st.speed}×` + (s ? ` · ${st.cur + 1}/${st.segs.length}` : "")));
   const live = document.querySelector("#text .seg.active .live");
   if (live) { live.replaceChildren(); if (st.playing) live.append(el("span", undefined, "ping"), document.createTextNode("Lecture audio en cours")); }
@@ -867,19 +871,19 @@ $("#btn-theme").onclick = () => {
   const dark = !document.documentElement.classList.contains("dark");
   localStorage.setItem("dark", dark ? "1" : "0"); applyTheme();
 };
-// ±10 s dans le passage en cours ; au-delà du début ou de la fin : passage précédent / suivant
-function seek(delta) {
-  if (!st.book) return;
-  unlockAudio();
-  const real = st.cfg.server_audio && audio.src && !isFiller() && audio.duration;
-  if (!real) return delta < 0 ? prev() : next();
-  const t = audio.currentTime + delta;
-  if (t < 0) return audio.currentTime > 2 ? (audio.currentTime = 0) : prev();
-  if (t >= audio.duration - 0.3) return next();
-  audio.currentTime = t;
-}
-$("#btn-back10").onclick = () => seek(-10);
-$("#btn-fwd10").onclick = () => seek(10);
+// Mini-lecteur : passage précédent / suivant, vitesse et voix à un appui (mêmes réglages que l'écran Lecture)
+$("#btn-mp-prev").onclick = () => { unlockAudio(); prev(); };
+$("#btn-mp-next").onclick = () => { unlockAudio(); next(); };
+const SPEEDS = ["0.8", "1", "1.25", "1.5", "2"];
+$("#btn-mp-speed").onclick = () => {
+  const sel = $("#speed"); sel.value = SPEEDS[(SPEEDS.indexOf(sel.value) + 1) % SPEEDS.length];
+  sel.dispatchEvent(new Event("change"));
+};
+$("#btn-mp-voice").onclick = () => {
+  const sel = $("#voice"); sel.value = sel.value === "homme" ? "femme" : "homme";
+  sel.dispatchEvent(new Event("change"));
+};
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { if (localStorage.getItem("dark") === null) applyTheme(); });
 audio.onended = () => { if (!isFiller()) next(); };
 // pause imposée par le système (appel, autre app audio) : on reflète l'état au lieu de croire que ça joue encore
 audio.onpause = () => { if (st.playing && !isFiller() && !audio.ended && audio.currentTime < audio.duration) { st.playing = false; setPlayIcon(); } };

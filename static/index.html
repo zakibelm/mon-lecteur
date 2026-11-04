@@ -1,14 +1,14 @@
 <!doctype html>
-<html lang="fr" class="dark">
+<html lang="fr">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#121316">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon-192.png">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Merriweather:ital,wght@0,400;0,700;1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>/* thème avant affichage (pas de flash) : choix enregistré, sinon réglage du téléphone */
+    try { var d = localStorage.getItem("dark");
+      document.documentElement.classList.toggle("dark", d === null ? matchMedia("(prefers-color-scheme: dark)").matches : d === "1"); } catch (e) {}</script>
   <link rel="stylesheet" href="style.css">
   <title>Mon Lecteur</title>
 </head>
@@ -133,12 +133,14 @@
       </div>
     </div>
     <div class="mp-ctrl">
-      <button id="btn-back10" class="icon-btn" title="Reculer de 10 s" aria-label="Reculer de 10 secondes">−10</button>
+      <button id="btn-mp-voice" class="mp-chip" title="Voix : femme / homme" aria-label="Changer de voix">👩</button>
+      <button id="btn-mp-speed" class="mp-chip" title="Vitesse" aria-label="Changer la vitesse">1×</button>
+      <button id="btn-mp-prev" class="icon-btn" title="Passage précédent" aria-label="Passage précédent"><svg viewBox="0 0 24 24"><path d="M19 20L9 12l10-8v16zM5 19V5"/></svg></button>
       <button id="btn-play" class="play-btn" aria-label="Lecture / pause">
         <svg id="ico-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
         <svg id="ico-pause" viewBox="0 0 24 24" hidden><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
       </button>
-      <button id="btn-fwd10" class="icon-btn" title="Avancer de 10 s" aria-label="Avancer de 10 secondes">+10</button>
+      <button id="btn-mp-next" class="icon-btn" title="Passage suivant" aria-label="Passage suivant"><svg viewBox="0 0 24 24"><path d="M5 4l10 8-10 8V4zM19 5v14"/></svg></button>
     </div>
   </div>
 

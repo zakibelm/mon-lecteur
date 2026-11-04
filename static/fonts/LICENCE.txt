@@ -1,0 +1,5 @@
+Polices hébergées localement (aucune requête vers un service externe) :
+- Merriweather — Copyright The Merriweather Project Authors — SIL Open Font License 1.1
+- Inter — Copyright The Inter Project Authors — SIL Open Font License 1.1
+Texte de la licence : https://openfontlicense.org
+Fichiers woff2 (jeux latin et latin étendu) tels que distribués par Google Fonts.

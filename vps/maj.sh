@@ -52,6 +52,12 @@ echo "--- 2. Limite d'envoi : ${MAX_MB} Mo par fichier"
 cp -a "$APP/.env" "$APP/.env.avant-$STAMP"
 if grep -q '^MAX_UPLOAD_MB=' "$APP/.env"; then sed -i "s|^MAX_UPLOAD_MB=.*|MAX_UPLOAD_MB=${MAX_MB}|" "$APP/.env"
 else echo "MAX_UPLOAD_MB=${MAX_MB}" >> "$APP/.env"; fi
+UNIT=/etc/systemd/system/lecteur.service    # arrêt borné à 10 s (une traduction en cours ne bloque plus le redémarrage)
+if [ -f "$UNIT" ] && ! grep -q -- '--timeout-graceful-shutdown' "$UNIT"; then
+  cp -a "$UNIT" "/root/lecteur.service.avant-$STAMP"
+  sed -i 's|^\(ExecStart=.*uvicorn app\.main:app.*\)$|\1 --timeout-graceful-shutdown 10|' "$UNIT" && systemctl daemon-reload
+  grep -q -- '--timeout-graceful-shutdown 10' "$UNIT" && ok "service : arrêt borné à 10 s (sauvegarde /root/lecteur.service.avant-$STAMP)"
+fi
 systemctl restart lecteur
 PORT="$(grep '^APP_PORT=' "$APP/.env" | cut -d= -f2-)"; PORT="${PORT:-8000}"
 TOKEN="$(grep '^API_TOKEN=' "$APP/.env" | cut -d= -f2-)"

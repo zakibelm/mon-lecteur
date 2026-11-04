@@ -27,7 +27,9 @@ def _cached(c, book_id: str, idx: int):
                      (book_id, idx)).fetchone()
 
 
-BATCH_MAX = int(os.getenv("TRANSLATE_BATCH", "3"))   # passages par appel groupé (1 = jamais groupé)
+# Mesuré sur le VPS (qwen2.5:7b, CPU, 24 passages) : 1 → ~12 s/passage, stable ; 3 → 14,3 s, 1 appel sur 4 raté ;
+# 8 → toutes les demandes au-delà de 90 s. D'où 1 par défaut ; un modèle rapide (ex. OpenRouter) peut grouper.
+BATCH_MAX = int(os.getenv("TRANSLATE_BATCH", "1"))   # passages par appel groupé (1 = jamais groupé)
 _no_batch: set[str] = set()         # livres où un appel groupé a échoué : passage par passage ensuite
 BATCH_CHARS = {"cjk": 350, "autre": 900}   # taille max du texte source d'un appel (sortie ≈ 1,5×, CPU lent)
 
