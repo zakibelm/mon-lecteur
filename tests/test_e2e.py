@@ -55,6 +55,8 @@ class FakeLLM(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         AUTH_SEEN.append((self.path, self.headers.get("Authorization", "")))
+        if self.path.endswith("/api/generate"):                 # réveil du modèle (API native d'Ollama)
+            return self._send({"done": True})
         if self.path.endswith("/embeddings"):
             EMB_TEXTS.extend(body["input"])
             if os.environ.get("EMB_FAIL"):
@@ -363,6 +365,27 @@ def v22_tests(c):
     got = "".join(x["original"] for x in c.get(f"/api/books/{kb}/segments", headers=H).json())
     assert "오늘 아침 서울에는" in got and "내렸습니다. 사람들은" in got, got
     print("✔ coréen : espaces entre mots conservés (extraction, nettoyage, découpage)")
+
+    # --- couverture (1re page) + titre/auteur du PDF quand aucun titre n'est donné ---
+    d_ = fitz.open(); d_.new_page().insert_textbox(fitz.Rect(50, 50, 550, 300), "Couverture du livre de test, page une.", fontsize=20)
+    d_.set_metadata({"title": "Le Grand Voyage", "author": "Jeanne Martin"})
+    cv = upload(c, d_.tobytes(), "fichier-sans-nom.pdf")
+    bk = c.get(f"/api/books/{cv}", headers=H).json()
+    assert bk["title"] == "Le Grand Voyage" and bk["author"] == "Jeanne Martin", (bk["title"], bk["author"])
+    im = c.get(f"/api/books/{cv}/cover", headers=H)
+    assert im.status_code == 200 and im.headers["content-type"] == "image/jpeg" and im.content[:2] == b"\xff\xd8", im.status_code
+    assert c.get(f"/api/books/{cv}/cover").status_code == 401
+    d2 = fitz.open(); d2.new_page().insert_textbox(fitz.Rect(50, 50, 550, 300), "Un autre livre avec un titre donné à l'import.", fontsize=14)
+    d2.set_metadata({"title": "Microsoft Word - brouillon.docx"})
+    r2 = c.post("/api/books", headers=H, files={"file": ("x.pdf", d2.tobytes(), "application/pdf")}, data={"title": "Mon titre"}).json()["id"]
+    assert c.get(f"/api/books/{r2}", headers=H).json()["title"] == "Mon titre", "un titre donné n'est jamais remplacé"
+    assert extract.pdf_meta(Path("x.png")) == ("", "")
+    assert extract._JUNK_TITLE.search("Microsoft Word - brouillon.docx") and not extract._JUNK_TITLE.search("Le Grand Voyage")
+    (config.DATA_DIR / "books" / cv / "cover.jpg").unlink()            # livre importé avant cette version
+    assert c.get(f"/api/books/{cv}/cover", headers=H).status_code == 200, "couverture refaite à la demande"
+    png = c.post("/api/books", headers=H, files={"file": ("scan.png", png_with_text("Hello cover"), "image/png")}).json()["id"]
+    assert c.get(f"/api/books/{png}/cover", headers=H).headers["content-type"] == "image/jpeg"
+    print("✔ couverture : 1re page en JPEG (PDF et image), refaite à la demande ; titre/auteur du PDF, jamais au-dessus d'un titre donné")
 
     # --- regroupement : phrases courtes d'une même page → un paragraphe (~30 s d'écoute), écritures non mélangées ---
     phrases = [f"Phrase courte numéro {i} du chapitre, lue en deux secondes." for i in range(20)]

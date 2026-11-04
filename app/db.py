@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS books(
   indexed INTEGER NOT NULL DEFAULT 0,          -- 1 = embeddings prêts (chat possible)
   translate INTEGER NOT NULL DEFAULT 1,        -- 1 = traduire vers le français si la langue détectée ≠ fr
   embed_sig TEXT NOT NULL DEFAULT '',          -- modèle d'embeddings utilisé pour l'index
+  author TEXT NOT NULL DEFAULT '',             -- auteur lu dans les métadonnées du PDF
+  title_auto INTEGER NOT NULL DEFAULT 0,       -- 1 = titre tiré du nom de fichier
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS segments(
@@ -87,6 +89,8 @@ def _migrate(c):
         ("segments", "lang", "TEXT NOT NULL DEFAULT 'und'"),
         ("books", "translate", "INTEGER NOT NULL DEFAULT 1"),
         ("books", "embed_sig", "TEXT NOT NULL DEFAULT ''"),
+        ("books", "author", "TEXT NOT NULL DEFAULT ''"),
+        ("books", "title_auto", "INTEGER NOT NULL DEFAULT 0"),   # 1 = titre tiré du nom de fichier (remplaçable)
     ):
         if col not in cols(table):
             c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")

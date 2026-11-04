@@ -117,6 +117,27 @@ function langBadge(b) {
 function pct(b) { return b.n_segments ? Math.min(100, Math.round((100 * (b.progress_idx + 1)) / b.n_segments)) : 0; }
 function bar(p) { const d = el("div", undefined, "bar"), f = el("div"); f.style.width = p + "%"; d.append(f); return d; }
 const STOP = new Set(["le", "la", "les", "l", "un", "une", "des", "du", "de", "d", "the", "a", "an", "of", "et", "and"]);
+// Couvertures : chargées seulement quand la carte apparaît à l'écran, gardées en mémoire pour la session
+st.covers = new Map();
+const coverObs = "IntersectionObserver" in window ? new IntersectionObserver((ents) => {
+  for (const e of ents) if (e.isIntersecting) { coverObs.unobserve(e.target); loadCover(e.target); }
+}, { rootMargin: "200px" }) : null;
+async function loadCover(box) {
+  const id = box.dataset.book;
+  if (!st.covers.has(id)) {
+    st.covers.set(id, api(`/books/${id}/cover`).then(async (r) => (r.ok ? URL.createObjectURL(await r.blob()) : null)).catch(() => null));
+  }
+  const url = await st.covers.get(id);
+  if (!url || !box.isConnected) return;
+  const img = el("img"); img.src = url; img.alt = ""; img.loading = "lazy";
+  box.replaceChildren(img); box.classList.add("has-img");
+}
+function coverEl(b, cls = "cover") {
+  const box = el("div", initials(b.title), cls);
+  box.dataset.book = b.id;
+  if (b.status !== "error") { if (coverObs) coverObs.observe(box); else loadCover(box); }
+  return box;
+}
 function initials(t) {                          // « La ville ancienne » → VA ; « Les saisons » → S
   const words = (t.match(/[\p{L}\p{N}]+/gu) || []).filter((w) => !STOP.has(w.toLowerCase()));
   return (words.length ? words.slice(0, 2).map((w) => w[0]).join("") : (t.trim()[0] || "?")).toUpperCase();
@@ -150,8 +171,11 @@ function renderResume(books) {
   const p = pct(b);
   const go = el("button", st.book && st.book.id === b.id && st.playing ? "Revenir à la lecture" : "Continuer la lecture", "btn-primary");
   go.onclick = () => readBook(b.id);
-  c.append(el("span", "Reprendre la lecture", "card-title"), t,
-           el("p", `Passage ${b.progress_idx + 1} sur ${b.n_segments} · ${p} %`, "muted"), bar(p), go);
+  const body = el("div", undefined, "resume-body"), txt = el("div");
+  txt.append(t); if (b.author) txt.append(el("p", b.author, "author"));
+  txt.append(el("p", `Passage ${b.progress_idx + 1} sur ${b.n_segments} · ${p} %`, "muted"));
+  body.append(coverEl(b, "cover big"), txt);
+  c.append(el("span", "Reprendre la lecture", "card-title"), body, bar(p), go);
   box.append(c);
 }
 async function renderPrepCards(list) {
@@ -195,16 +219,17 @@ function prepCard(b, p) {
 function renderBooks() {
   const ul = $("#books"), q = ($("#lib-search").value || "").trim().toLowerCase();
   ul.replaceChildren();
-  const list = st.books.filter((b) => !q || b.title.toLowerCase().includes(q));
+  const list = st.books.filter((b) => !q || b.title.toLowerCase().includes(q) || (b.author || "").toLowerCase().includes(q));
   for (const b of list) {
     const li = el("li", undefined, "card book");
     if (st.fresh.has(b.id)) li.classList.add("fresh");
     const info = el("div");
     const h = el("h3", b.title); const badge = langBadge(b); if (badge) h.append(el("span", badge, "badge"));
+    if (b.author) info.append(el("p", b.author, "author"));
     const meta = b.status === "processing" ? `Extraction : page ${b.pages_done}/${b.pages_total}`
       : b.status === "error" ? "Erreur : " + b.error
       : `${b.pages_total} p. · ${b.n_segments} passages` + (b.progress_idx > 0 ? ` · lu à ${pct(b)} %` : "") + (b.preparing ? " · préparation en cours" : "");
-    info.append(h, el("p", meta, "muted"));
+    info.prepend(h); info.append(el("p", meta, "muted"));
     if (b.status === "ready" && b.progress_idx > 0) info.append(bar(pct(b)));
     const actions = el("div", undefined, "actions");
     const open = el("button", st.book && st.book.id === b.id ? "Reprendre" : "Lire", "btn-primary");
@@ -219,12 +244,13 @@ function renderBooks() {
     };
     actions.append(open, del);
     info.append(actions);
-    li.append(el("div", initials(b.title), "cover"), info);
+    li.append(coverEl(b), info);
     ul.append(li);
   }
   if (!list.length) ul.append(el("li", q ? "Aucun livre ne correspond." : "Aucun livre pour l'instant : appuie sur « ＋ Importer des documents » ci-dessus pour ajouter un PDF.", "card muted empty"));
 }
 $("#lib-search").oninput = renderBooks;
+$("#lib-search").placeholder = "Rechercher par titre ou auteur…";
 $("#import-card > summary").addEventListener("click", () => { st.importTouched = true; });   // seul un appui de l'utilisateur compte
 $("#btn-search").onclick = () => {
   st.searchOpen = !st.searchOpen;

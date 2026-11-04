@@ -115,6 +115,7 @@ def _finalize_langs(book_id: str, chosen: str) -> None:
 
 def process_book(book_id: str, src: Path, lang: str = "auto", remap: dict | None = None) -> None:
     """Tâche de fond : extraction page par page (lisible dès la page 1), détection de langue, puis indexation RAG."""
+    _cover_and_meta(book_id, src)
     try:
         with db() as c:
             c.execute("UPDATE books SET pages_total=? WHERE id=?", (extract.count_pages(src), book_id))
@@ -146,6 +147,22 @@ def process_book(book_id: str, src: Path, lang: str = "auto", remap: dict | None
     if row and row["status"] == "ready":
         prepare.preparer.ahead(book_id, row["progress_idx"] - 1, 10)
     _index_quietly(book_id)
+
+
+def _cover_and_meta(book_id: str, src: Path) -> Path | None:
+    """Couverture (première page) + titre/auteur du PDF quand aucun titre n'a été donné à l'import."""
+    out = src.parent / "cover.jpg"
+    if not out.exists():
+        data = extract.cover_jpeg(src)
+        if data:
+            out.write_bytes(data)
+    t, a = extract.pdf_meta(src)
+    with db() as c:
+        if t:
+            c.execute("UPDATE books SET title=?, title_auto=0 WHERE id=? AND title_auto=1", (t[:200], book_id))
+        if a:
+            c.execute("UPDATE books SET author=? WHERE id=? AND author=''", (a[:120], book_id))
+    return out if out.exists() else None
 
 
 def _remap_after_resegment(book_id: str, remap: dict) -> None:
@@ -217,8 +234,8 @@ def upload(background: BackgroundTasks, file: UploadFile = File(...),
         raise HTTPException(413, f"Fichier trop volumineux (max {config.MAX_UPLOAD_MB} Mo)")
     name = title.strip() or Path(file.filename).stem
     with db() as c:
-        c.execute("INSERT INTO books(id, title, lang, translate) VALUES(?,?,?,?)",
-                  (book_id, name[:200], lang, int(do_translate)))
+        c.execute("INSERT INTO books(id, title, lang, translate, title_auto) VALUES(?,?,?,?,?)",
+                  (book_id, name[:200], lang, int(do_translate), int(not title.strip())))
     background.add_task(process_book, book_id, src, lang)
     return {"id": book_id}
 
@@ -304,6 +321,20 @@ def prepare_status(book_id: str, from_idx: int | None = None):
     with db() as c:
         _book_or_404(c, book_id)
     return prepare.status(book_id, from_idx)
+
+
+@app.get("/api/books/{book_id}/cover", dependencies=[Depends(auth)])
+def get_cover(book_id: str):
+    """Miniature de la première page ; fabriquée à la demande pour les livres importés avant cette version."""
+    with db() as c:
+        _book_or_404(c, book_id)
+    folder = config.DATA_DIR / "books" / book_id
+    path = folder / "cover.jpg"
+    if not path.exists():
+        src = next(folder.glob("source.*"), None)
+        if not src or not _cover_and_meta(book_id, src):
+            raise HTTPException(404, "Pas de couverture")
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
 
 
 @app.put("/api/books/{book_id}/progress", dependencies=[Depends(auth)])

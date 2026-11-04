@@ -195,3 +195,45 @@ def iter_pages(path: Path, lang: str = "auto"):
             if lang == "auto":
                 lang = _auto_lang(img)
             yield 1, chunk(_ocr(img, lang))
+
+
+COVER_W = 300
+_JUNK_TITLE = re.compile(r"^(microsoft (word|powerpoint)|untitled|sans titre|document\d*$|title$|\d+$)|\.(docx?|pdf|indd|tex)$", re.I)
+
+
+def cover_jpeg(path: Path) -> bytes | None:
+    """Miniature de la première page (PDF) ou de l'image, ~300 px de large, JPEG."""
+    try:
+        if path.suffix.lower() == ".pdf":
+            with fitz.open(path) as doc:
+                if not doc.page_count:
+                    return None
+                page = doc[0]
+                z = COVER_W / max(1.0, page.rect.width)
+                return page.get_pixmap(matrix=fitz.Matrix(z, z), alpha=False).tobytes("jpeg", jpg_quality=80)
+        with Image.open(path) as img:
+            img = img.convert("RGB")
+            img.thumbnail((COVER_W, COVER_W * 2))
+            buf = io.BytesIO(); img.save(buf, "JPEG", quality=80)
+            return buf.getvalue()
+    except Exception as e:  # noqa: BLE001 — une couverture manquante n'empêche jamais la lecture
+        log.info("Couverture impossible pour %s : %s", path, e)
+        return None
+
+
+def pdf_meta(path: Path) -> tuple[str, str]:
+    """(titre, auteur) enregistrés dans le PDF, si lisibles ; chaînes vides sinon."""
+    if path.suffix.lower() != ".pdf":
+        return "", ""
+    try:
+        with fitz.open(path) as doc:
+            m = doc.metadata or {}
+    except Exception:  # noqa: BLE001
+        return "", ""
+    title = " ".join((m.get("title") or "").split())
+    author = " ".join((m.get("author") or "").split())
+    if not (3 <= len(title) <= 150) or _JUNK_TITLE.search(title):
+        title = ""
+    if not (2 <= len(author) <= 120) or _JUNK_TITLE.search(author):
+        author = ""
+    return title, author
