@@ -8,7 +8,7 @@ import pymupdf as fitz  # PyMuPDF
 import pytesseract
 from PIL import Image
 
-from .config import MAX_CHARS, MAX_CHARS_CJK, OCR_DPI, OCR_LANG, OCR_PACKS
+from .config import MAX_CHARS, MAX_CHARS_CJK, MERGE, OCR_DPI, OCR_LANG, OCR_PACKS
 
 log = logging.getLogger("extract")
 SENT_SPLIT = re.compile(r"(?<=[.!?…؟])\s+")
@@ -145,8 +145,31 @@ def _split_paragraph(p: str) -> list[str]:
     return final
 
 
+def _kind(p: str) -> str:
+    return "sans-espace" if (_NOSPACE_RE.search(p) and not _HANGUL_RE.search(p)) else "espace"
+
+
+def merge_short(paragraphs: list[str]) -> list[str]:
+    """Regroupe les blocs consécutifs (même page, même type d'écriture) jusqu'à la taille cible d'un passage.
+    Mesuré sur un vrai PDF : découpé phrase par phrase, chaque passage durait 1 à 4 s d'écoute — traduit sans
+    contexte et impossible à préparer plus vite qu'on ne l'écoute. Un passage vise ~30 s d'écoute."""
+    out: list[str] = []
+    for p in paragraphs:
+        if out and _kind(out[-1]) == _kind(p):
+            limit = MAX_CHARS_CJK if _CJK_RE.search(out[-1] + p) else MAX_CHARS
+            sep = "" if _kind(p) == "sans-espace" else " "
+            if len(out[-1]) + len(sep) + len(p) <= limit:
+                out[-1] = out[-1] + sep + p
+                continue
+        out.append(p)
+    return out
+
+
 def chunk(paragraphs: list[str]) -> list[str]:
-    """Découpe en segments (unité de lecture, de traduction, de surlignage et de cache audio)."""
+    """Découpe en segments (unité de lecture, de traduction, de surlignage et de cache audio) : les blocs courts
+    sont d'abord regroupés en paragraphes, les trop longs coupés aux fins de phrase."""
+    if MERGE:
+        paragraphs = merge_short(paragraphs)
     return [seg for p in paragraphs for seg in _split_paragraph(p)]
 
 

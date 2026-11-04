@@ -11,6 +11,7 @@ OCR_LANG = os.getenv("OCR_LANG", "fra+eng")      # ajouter +ara si tesseract-ocr
 OCR_DPI = int(os.getenv("OCR_DPI", "300"))
 MAX_CHARS = int(os.getenv("SEGMENT_MAX_CHARS", "500"))
 MAX_CHARS_CJK = int(os.getenv("SEGMENT_MAX_CHARS_CJK", "160"))   # 1 caractère CJK ≈ 1 mot : segments plus courts
+MERGE = os.getenv("SEGMENT_MERGE", "1") != "0"   # regrouper les phrases/blocs courts en paragraphes (~30 s d'écoute)
 # Packs OCR par langue du document (les paquets tesseract-ocr-* correspondants doivent être installés)
 OCR_PACKS = {"zh": "chi_sim+eng", "zh-tw": "chi_tra+eng", "ja": "jpn+eng", "ko": "kor+eng", "ar": "ara+eng"}
 

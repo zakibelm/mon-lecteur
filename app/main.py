@@ -113,7 +113,7 @@ def _finalize_langs(book_id: str, chosen: str) -> None:
         c.execute("UPDATE books SET lang=? WHERE id=?", (book_lang, book_id))
 
 
-def process_book(book_id: str, src: Path, lang: str = "auto") -> None:
+def process_book(book_id: str, src: Path, lang: str = "auto", remap: dict | None = None) -> None:
     """Tâche de fond : extraction page par page (lisible dès la page 1), détection de langue, puis indexation RAG."""
     try:
         with db() as c:
@@ -134,13 +134,37 @@ def process_book(book_id: str, src: Path, lang: str = "auto") -> None:
                           ("Aucun texte extrait du document", book_id))
             else:
                 c.execute("UPDATE books SET status='ready' WHERE id=?", (book_id,))
+        if remap and idx:
+            _remap_after_resegment(book_id, remap)
     except Exception as e:
         log.exception("Échec du traitement de %s", book_id)
         with db() as c:
             c.execute("UPDATE books SET status='error', error=? WHERE id=?", (str(e)[:300], book_id))
         return
-    prepare.preparer.ahead(book_id, -1, 10)       # démarrage instantané : les 10 premiers passages d'avance
+    with db() as c:                              # démarrage instantané : 10 passages d'avance depuis la position
+        row = c.execute("SELECT progress_idx, status FROM books WHERE id=?", (book_id,)).fetchone()
+    if row and row["status"] == "ready":
+        prepare.preparer.ahead(book_id, row["progress_idx"] - 1, 10)
     _index_quietly(book_id)
+
+
+def _remap_after_resegment(book_id: str, remap: dict) -> None:
+    """Après un redécoupage : position de lecture = passage qui contient le même endroit du texte (en caractères) ;
+    vocabulaire = passage qui contient son contexte d'origine (sinon le terme)."""
+    with db() as c:
+        rows = c.execute("SELECT idx, text FROM segments WHERE book_id=? ORDER BY idx", (book_id,)).fetchall()
+        offset, new_pos = 0, 0
+        for r in rows:
+            if offset + len(r["text"]) > remap["offset"]:
+                new_pos = r["idx"]; break
+            offset += len(r["text"]); new_pos = r["idx"]
+        c.execute("UPDATE books SET progress_idx=? WHERE id=?", (new_pos, book_id))
+        for v in c.execute("SELECT id, term, original FROM vocab WHERE book_id=?", (book_id,)).fetchall():
+            probe = (v["original"] or "")[:40]
+            hit = next((r for r in rows if probe and probe in r["text"]), None) \
+                or next((r for r in rows if v["term"].lower() in r["text"].lower()), None)
+            if hit:
+                c.execute("UPDATE vocab SET idx=? WHERE id=?", (hit["idx"], v["id"]))
 
 
 def _index_quietly(book_id: str) -> None:
@@ -286,6 +310,9 @@ def prepare_status(book_id: str, from_idx: int | None = None):
 def set_progress(book_id: str, body: Progress):
     with db() as c:
         _book_or_404(c, book_id)
+        n = c.execute("SELECT COUNT(*) FROM segments WHERE book_id=?", (book_id,)).fetchone()[0]
+        if body.idx >= max(1, n):      # position d'un ancien découpage (ex. envoyée pendant un regroupement) : ignorée
+            return {"ok": False, "reason": f"position {body.idx} hors du livre ({n} passages)"}
         c.execute("UPDATE books SET progress_idx=? WHERE id=?", (body.idx, book_id))
     return {"ok": True}
 
@@ -341,6 +368,57 @@ def retranslate(book_id: str, body: Retranslate):
         for f in audio.glob("*.mp3" if body.idx is None else f"{body.idx}-*.mp3"):
             f.unlink(missing_ok=True)
     return {"ok": True}
+
+
+@app.post("/api/books/{book_id}/resegment", dependencies=[Depends(auth)])
+def resegment(book_id: str, background: BackgroundTasks):
+    """Redécoupe un livre déjà importé en paragraphes (depuis le fichier d'origine). Les traductions, l'audio et
+    l'index de ce livre sont refaits ; la position de lecture et le vocabulaire sont recalés sur le texte."""
+    with db() as c:
+        book = _book_or_404(c, book_id)
+        if book["status"] != "ready":
+            raise HTTPException(409, "Le livre n'est pas prêt")
+        rows = c.execute("SELECT text FROM segments WHERE book_id=? AND idx<? ORDER BY idx",
+                         (book_id, book["progress_idx"])).fetchall()
+        before = c.execute("SELECT COUNT(*) FROM segments WHERE book_id=?", (book_id,)).fetchone()[0]
+    folder = config.DATA_DIR / "books" / book_id
+    src = next(folder.glob("source.*"), None)
+    if not src:
+        raise HTTPException(404, "Fichier d'origine introuvable : réimporte le livre")
+    prepare.preparer.stop(book_id)
+    if rag.is_running(book_id):
+        raise HTTPException(409, "Indexation en cours : réessaie dans quelques minutes")
+    with db() as c:
+        for t in ("embeddings", "translations", "segments"):
+            c.execute(f"DELETE FROM {t} WHERE book_id=?", (book_id,))
+        c.execute("UPDATE books SET status='processing', pages_done=0, indexed=0, embed_sig='', error=NULL WHERE id=?", (book_id,))
+    shutil.rmtree(folder / "audio", ignore_errors=True)
+    background.add_task(process_book, book_id, src, book["lang"] if book["lang"] in UPLOAD_LANGS else "auto",
+                        {"offset": sum(len(r["text"]) for r in rows)})
+    return {"ok": True, "before": before}
+
+
+@app.post("/api/books/{book_id}/warmup", dependencies=[Depends(auth)])
+def warmup(book_id: str):
+    """Réveille le modèle de traduction (Ollama le décharge après 5 min sans demande ; rechargement mesuré :
+    ~3 min). Ne change pas la configuration d'Ollama : une simple demande de chargement, en tâche de fond."""
+    with db() as c:
+        book = _book_or_404(c, book_id)
+    r = settings.load()["roles"]["translate"]
+    if not book["translate"] or book["lang"] in ("fr", "und") or r["provider"] != "ollama":
+        return {"ok": True, "warming": False}
+    threading.Thread(target=_warm_ollama, args=(r["model"],), daemon=True).start()
+    return {"ok": True, "warming": True, "model": r["model"]}
+
+
+def _warm_ollama(model: str) -> None:
+    import httpx
+    base = settings.load()["providers"]["ollama"]["base_url"].rstrip("/")
+    root = base[:-3] if base.endswith("/v1") else base
+    try:              # requête vide de l'API native : charge le modèle sans rien générer
+        httpx.post(f"{root}/api/generate", json={"model": model, "keep_alive": "15m"}, timeout=600)
+    except httpx.HTTPError as e:
+        log.info("Réveil du modèle %s impossible : %s", model, e)
 
 
 @app.post("/api/books/{book_id}/reindex", dependencies=[Depends(auth)])

@@ -364,6 +364,42 @@ def v22_tests(c):
     assert "오늘 아침 서울에는" in got and "내렸습니다. 사람들은" in got, got
     print("✔ coréen : espaces entre mots conservés (extraction, nettoyage, découpage)")
 
+    # --- regroupement : phrases courtes d'une même page → un paragraphe (~30 s d'écoute), écritures non mélangées ---
+    phrases = [f"Phrase courte numéro {i} du chapitre, lue en deux secondes." for i in range(20)]
+    doc = fitz.open(); pg = doc.new_page()
+    for i, t in enumerate(phrases):
+        pg.insert_textbox(fitz.Rect(40, 30 + i * 38, 560, 66 + i * 38), t, fontsize=10)
+    rb = upload(c, doc.tobytes(), "phrases.pdf")
+    segs_ = c.get(f"/api/books/{rb}/segments", headers=H).json()
+    assert 2 <= len(segs_) <= 4 and all(len(x["original"]) <= config.MAX_CHARS for x in segs_), [len(x["original"]) for x in segs_]
+    assert " ".join(x["original"] for x in segs_) == " ".join(phrases), "rien perdu, ordre conservé"
+    assert extract.chunk(["Chapter 1", "这座古老的城市。", "Next."]) == ["Chapter 1", "这座古老的城市。", "Next."]
+    print(f"✔ regroupement : 20 phrases courtes → {len(segs_)} paragraphes, texte et ordre intacts, écritures non mélangées")
+
+    # --- redécoupage d'un livre déjà importé : position et vocabulaire recalés ---
+    import app.main as _m
+    old = extract.MERGE; extract.MERGE = False
+    try:
+        rs = upload(c, doc.tobytes(), "ancien.pdf")            # comme un ancien import : 1 phrase = 1 passage
+    finally:
+        extract.MERGE = old
+    assert len(c.get(f"/api/books/{rs}/segments", headers=H).json()) == 20
+    c.put(f"/api/books/{rs}/progress", headers=H, json={"idx": 15})
+    c.post("/api/vocab", headers=H, json={"book_id": rs, "idx": 12, "term": "numéro 12"})
+    r = c.post(f"/api/books/{rs}/resegment", headers=H)
+    assert r.status_code == 200 and r.json()["before"] == 20, r.text
+    bk = c.get(f"/api/books/{rs}", headers=H).json()
+    new = c.get(f"/api/books/{rs}/segments", headers=H).json()
+    assert bk["status"] == "ready" and len(new) == len(segs_), (bk["status"], len(new))
+    assert "numéro 15 du" in new[bk["progress_idx"]]["original"], (bk["progress_idx"], new[bk["progress_idx"]]["original"][:60])
+    late = c.put(f"/api/books/{rs}/progress", headers=H, json={"idx": 15}).json()       # ancienne position arrivée en retard
+    assert late["ok"] is False and c.get(f"/api/books/{rs}", headers=H).json()["progress_idx"] == bk["progress_idx"], late
+    vv = [x for x in c.get("/api/vocab", headers=H).json() if x["book_id"] == rs][0]
+    assert "numéro 12 du" in new[vv["idx"]]["original"], vv
+    assert c.post(f"/api/books/{rs}/resegment", headers=H).status_code == 200      # relançable
+    print(f"✔ redécoupage : 20 → {len(new)} passages, position (phrase 16) et vocabulaire recalés sur le même texte")
+    assert c.post(f"/api/books/{rs}/warmup", headers=H).json()["warming"] is False   # livre français : rien à réveiller
+
     # --- clé OpenRouter : chiffrée au repos, jamais renvoyée en clair ---
     SECRET = "sk-or-v1-SECRETSECRETSECRET1234"
     r = c.put("/api/settings", headers=H, json={"providers": {"openrouter": {"api_key": SECRET}}})
@@ -467,8 +503,13 @@ def v22_tests(c):
     # --- indexation interrompue (redémarrage pendant l'indexation d'un gros livre) : reprise sans tout refaire ---
     import app.main as main_mod
     from app import rag
-    long = "\n\n".join(f"Paragraphe numéro {i} du gros livre, avec assez de mots pour être un passage." for i in range(40))
-    doc = fitz.open(); doc.new_page().insert_textbox(fitz.Rect(30, 30, 580, 820), long, fontsize=7)
+    filler = " Il contient assez de phrases pour former à lui seul un vrai paragraphe de lecture, long d'une vingtaine de secondes à l'écoute, comme dans un livre réel."
+    doc = fitz.open()
+    for pg in range(8):                            # 8 pages × 5 paragraphes d'environ 260 caractères = 40 passages
+        page = doc.new_page()
+        for k in range(5):
+            i = pg * 5 + k
+            page.insert_textbox(fitz.Rect(30, 30 + k * 150, 580, 170 + k * 150), f"Paragraphe numéro {i} du gros livre." + filler, fontsize=9)
     big = upload(c, doc.tobytes(), "gros.pdf")
     done, total = rag.progress(big)
     assert total >= 10 and done == total, (done, total)
@@ -498,31 +539,37 @@ def v22_tests(c):
     print(f"✔ indexation interrompue : reprise au démarrage et par « Réindexer » sans tout refaire ({total} passages)")
 
     # --- vocabulaire : contexte copié, doublon ignoré, recherche, export CSV, survit au livre supprimé ---
-    v = c.post("/api/vocab", headers=H, json={"book_id": big, "idx": 2, "term": "  numéro   2 "}).json()
+    i2 = next(x["idx"] for x in c.get(f"/api/books/{big}/segments", headers=H).json() if "numéro 2 du" in x["original"])
+    v = c.post("/api/vocab", headers=H, json={"book_id": big, "idx": i2, "term": "  numéro   2 "}).json()
     assert not v["duplicate"]
-    assert c.post("/api/vocab", headers=H, json={"book_id": big, "idx": 2, "term": "numéro 2"}).json()["duplicate"]
+    assert c.post("/api/vocab", headers=H, json={"book_id": big, "idx": i2, "term": "numéro 2"}).json()["duplicate"]
     assert c.post("/api/vocab", headers=H, json={"book_id": big, "idx": 99999, "term": "x"}).status_code == 404
     assert c.post("/api/vocab", headers=H, json={"book_id": "inconnu", "idx": 0, "term": "x"}).status_code == 404
-    lst = c.get("/api/vocab", headers=H, params={"q": "numéro"}).json()
+    lst = [x for x in c.get("/api/vocab", headers=H, params={"q": "numéro"}).json() if x["book_id"] == big]
     assert len(lst) == 1 and lst[0]["term"] == "numéro 2" and "Paragraphe numéro 2" in lst[0]["original"], lst
     csv_ = c.get("/api/vocab.csv", headers=H)
     assert csv_.status_code == 200 and "numéro 2" in csv_.text and csv_.text.startswith("\ufeffterme;"), csv_.text[:80]
     assert c.get("/api/vocab.csv").status_code == 401
     assert c.get("/api/books", headers=H).json()[0].get("preparing") is False
-    assert c.delete(f"/api/vocab/{v['id']}", headers=H).json()["ok"] and c.get("/api/vocab", headers=H).json() == []
+    assert c.delete(f"/api/vocab/{v['id']}", headers=H).json()["ok"]
+    assert not [x for x in c.get("/api/vocab", headers=H).json() if x["book_id"] == big]
     assert c.delete(f"/api/vocab/{v['id']}", headers=H).status_code == 404
     print("✔ vocabulaire : ajout avec contexte, doublon ignoré, recherche, export CSV (BOM), suppression")
 
     # --- traduction groupée : un paragraphe de 5 passages = UN appel au modèle ---
-    zh5 = ["第一句话在这里。", "第二句话在那里。", "第三句话很短。", "第四句话也很短。", "第五句话结束了。"]
-    doc = fitz.open(); pg = doc.new_page()
-    for i, t in enumerate(zh5):
-        pg.insert_textbox(fitz.Rect(50, 50 + i * 60, 550, 100 + i * 60), t, fontsize=14, fontname="china-s")
+    zh5 = ["第一句话在这里，我们正在测试一个比较长的句子。", "第二句话在那里，它也需要足够长才能被正确识别。",
+           "第三句话很短，但是我们故意把它写得更长一些。", "第四句话也很短，所以我们在后面加上了更多的文字。",
+           "第五句话结束了，这本小书的测试也就到此为止了。"]   # > 20 caractères par page (sinon : page « scannée »)
+    doc = fitz.open()
+    for t in zh5:                                  # une phrase par page : le regroupement ne traverse pas les pages
+        doc.new_page().insert_textbox(fitz.Rect(50, 50, 550, 100), t, fontsize=14, fontname="china-s")
     gid = upload(c, doc.tobytes(), "zh5.pdf")
     assert reading.BATCH_MAX == 1, "1 passage par demande par défaut (mesuré le plus stable sur CPU)"
     reading.BATCH_MAX = 3                          # regroupement testé tel qu'activé avec TRANSLATE_BATCH=3
     segs = c.get(f"/api/books/{gid}/segments", headers=H).json()
     assert [x["original"] for x in segs] == zh5, [x["original"] for x in segs]
+    w_ = c.post(f"/api/books/{gid}/warmup", headers=H).json()
+    assert w_["warming"] is True and w_["model"] == "qwen2.5:7b", w_            # livre à traduire, Ollama : réveil
     n0 = len(TR_CALLS)
     r0 = c.get(f"/api/books/{gid}/segments/0/read", headers=H).json()
     assert r0["translated"] and r0["text"] == f"FR: {zh5[0]}", r0
@@ -681,8 +728,10 @@ def main():
         print("✔ voix femme / homme : modèle Piper choisi, un fichier audio par voix, arabe → voix d'homme")
 
         # --- progression ---
-        assert c.put(f"/api/books/{bid}/progress", headers=H, json={"idx": 2}).status_code == 200
-        assert c.get(f"/api/books/{bid}", headers=H).json()["progress_idx"] == 2
+        nseg = c.get(f"/api/books/{bid}", headers=H).json()["n_segments"]
+        assert c.put(f"/api/books/{bid}/progress", headers=H, json={"idx": nseg - 1}).json()["ok"] is True
+        assert c.get(f"/api/books/{bid}", headers=H).json()["progress_idx"] == nseg - 1
+        assert c.put(f"/api/books/{bid}/progress", headers=H, json={"idx": nseg}).json()["ok"] is False   # hors du livre
         assert c.put(f"/api/books/{bid}/progress", headers=H, json={"idx": -1}).status_code == 422
 
         # --- chat RAG (LLM simulé) ---

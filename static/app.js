@@ -294,7 +294,9 @@ async function openBook(id) {
   $("#chk-translate").checked = !!st.book.translate;
   refreshPrep().catch(() => {});
   jget("/books").then(fillBookPick).catch(() => {});
+  api(`/books/${id}/warmup`, { method: "POST" }).catch(() => {});   // modèle chargé avant qu'on en ait besoin
   await loadMoreSegments();
+  showShortHint();
   $("#player").hidden = false; document.body.classList.add("has-player"); $("#reader-tools").hidden = false;
   showView("reader");
   updateStatus();
@@ -820,6 +822,37 @@ async function saveSettings(quiet, { roles: withRoles = true } = {}) {
   } catch (e) { msg.textContent = "✘ " + e.message; return false; }
 }
 $("#settings-form").onsubmit = (ev) => { ev.preventDefault(); saveSettings(false); };
+
+/* ---------- Passages trop courts → regroupement en paragraphes ---------- */
+function showShortHint() {
+  const n = st.segs.length, avg = n ? st.segs.reduce((t, x) => t + x.original.length, 0) / n : 0;
+  const short = st.book.status === "ready" && n >= 20 && avg < 150;
+  $("#short-hint").hidden = !short;
+  if (short) $("#short-msg").textContent = `Les passages de ce livre sont très courts (${Math.round(avg)} caractères en moyenne, `
+    + `environ ${Math.max(1, Math.round(avg / 15))} s d'écoute) : traduits phrase par phrase, ils perdent le contexte, et la `
+    + "préparation ne peut pas suivre la lecture. Regroupe-les en paragraphes d'environ 30 s.";
+}
+async function resegment() {
+  if (!st.book) return;
+  const p = await jget(`/books/${st.book.id}/prepare`).catch(() => null);
+  if (!confirm("Regrouper les passages en paragraphes ?\n\n• Ta position de lecture et ton vocabulaire sont conservés.\n"
+    + `• Les traductions et l'audio déjà préparés${p ? ` (${p.ready} passages)` : ""} seront refaits, ainsi que l'index de la discussion.`)) return;
+  clearTimeout(st.saveTimer);                 // ne pas renvoyer une position de l'ancien découpage
+  stopSound(); st.playId++; st.playing = false; setPlayIcon();
+  try {
+    const r = await jpost(`/books/${st.book.id}/resegment`);
+    const id = st.book.id;
+    note(`Regroupement en cours (${r.before} passages avant)…`);
+    for (let i = 0; i < 600; i++) {
+      await new Promise((res) => setTimeout(res, 2000));
+      const b = await jget("/books/" + id);
+      if (b.status !== "processing") { await openBook(id); note(`Regroupé : ${r.before} → ${b.n_segments} passages.`); return; }
+      note(`Regroupement en cours : page ${b.pages_done}/${b.pages_total}…`);
+    }
+  } catch (e) { note(e.message); }
+}
+$("#btn-reseg").onclick = resegment;
+$("#btn-reseg2").onclick = resegment;
 
 /* ---------- Vocabulaire ---------- */
 function selectedInReader() {                  // { term, idx } si une sélection est faite dans une carte du texte
