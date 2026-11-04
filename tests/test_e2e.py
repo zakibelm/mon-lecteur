@@ -2,6 +2,7 @@
 Usage (depuis la racine du projet) :  python tests/test_e2e.py
 """
 import http.server
+import re
 import io
 import json
 import os
@@ -69,6 +70,13 @@ class FakeLLM(http.server.BaseHTTPRequestHandler):
             text = msgs[-1]["content"].split("Texte à traduire :\n", 1)[1]
             if text.startswith("FAIL"):
                 return self._send({"error": "boom"}, 429)
+            if text.startswith("[1] "):                              # appel groupé (un paragraphe)
+                TR_CALLS.append((_tag(self.path), text))
+                if os.environ.get("BATCH_BAD"):
+                    return self._send({"choices": [{"message": {"content": "FR: tout mélangé sans numéros"}}]})
+                blocks = re.split(r"\[(\d+)\] ", text)[1:]
+                out = "\n".join(f"[{n}] FR{_tag(self.path)}: {t.strip()}" for n, t in zip(blocks[::2], blocks[1::2]))
+                return self._send({"choices": [{"message": {"content": "<think>x</think>" + out}}]})
             TR_CALLS.append((_tag(self.path), text))
             return self._send({"choices": [{"message": {"content": f"<think>hmm</think>FR{_tag(self.path)}: {text}"}}]})
         self._send({"choices": [{"message": {"content": "Réponse simulée"}}]})
@@ -100,6 +108,9 @@ from PIL import Image, ImageDraw, ImageFont  # noqa: E402
 from app import config, detect, extract, llm, settings, translate  # noqa: E402
 from app import db as database  # noqa: E402
 from app.main import app  # noqa: E402
+from app import prepare  # noqa: E402
+
+prepare.preparer.enabled = False      # préparation en avance testée à part (comptages déterministes ailleurs)
 
 langs = subprocess.run(["tesseract", "--list-langs"], capture_output=True, text=True).stdout
 extract.OCR_LANG = "eng"        # le test OCR est en anglais ; en prod : fra+eng(+ara)
@@ -472,6 +483,61 @@ def v22_tests(c):
     assert rr["ok"] and rag.progress(big) == (total, total) and len(EMB_TEXTS) == total - 5, (rr, len(EMB_TEXTS))
     assert c.post(f"/api/books/{big}/chat", headers=H, json={"question": "paragraphe"}).status_code == 200
     print(f"✔ indexation interrompue : reprise au démarrage et par « Réindexer » sans tout refaire ({total} passages)")
+
+    # --- traduction groupée : un paragraphe de 5 passages = UN appel au modèle ---
+    zh5 = ["第一句话在这里。", "第二句话在那里。", "第三句话很短。", "第四句话也很短。", "第五句话结束了。"]
+    doc = fitz.open(); pg = doc.new_page()
+    for i, t in enumerate(zh5):
+        pg.insert_textbox(fitz.Rect(50, 50 + i * 60, 550, 100 + i * 60), t, fontsize=14, fontname="china-s")
+    gid = upload(c, doc.tobytes(), "zh5.pdf")
+    segs = c.get(f"/api/books/{gid}/segments", headers=H).json()
+    assert [x["original"] for x in segs] == zh5, [x["original"] for x in segs]
+    n0 = len(TR_CALLS)
+    r0 = c.get(f"/api/books/{gid}/segments/0/read", headers=H).json()
+    assert r0["translated"] and r0["text"] == f"FR: {zh5[0]}", r0
+    assert len(TR_CALLS) == n0 + 1, f"{len(TR_CALLS) - n0} appels au lieu d'1"
+    for i in range(1, 5):
+        ri = c.get(f"/api/books/{gid}/segments/{i}/read", headers=H).json()
+        assert ri["translated"] and ri["text"] == f"FR: {zh5[i]}", ri
+    assert len(TR_CALLS) == n0 + 1, "les passages suivants étaient déjà traduits par l'appel groupé"
+    # réponse mal numérotée : retour au passage par passage, rien n'est perdu
+    c.post(f"/api/books/{gid}/retranslate", headers=H, json={})
+    os.environ["BATCH_BAD"] = "1"
+    n0 = len(TR_CALLS)
+    r0 = c.get(f"/api/books/{gid}/segments/0/read", headers=H).json()
+    del os.environ["BATCH_BAD"]
+    assert r0["translated"] and r0["text"] == f"FR: {zh5[0]}" and len(TR_CALLS) == n0 + 2, (r0, len(TR_CALLS) - n0)
+    print("✔ traduction par paragraphe : 5 passages en 1 appel ; réponse mal numérotée → passage par passage")
+
+    # --- préparation en avance (traduction + audio) côté serveur ---
+    import time as _t
+    old_tts = config.TTS_PROVIDER; config.TTS_PROVIDER = "piper"
+    prepare.preparer.enabled = True
+    try:
+        c.post(f"/api/books/{gid}/retranslate", headers=H, json={})
+        assert c.get(f"/api/books/{gid}/segments/0/audio", headers=H).status_code == 200
+        for _ in range(100):                         # la page n'a demandé QUE le passage 0
+            st_ = c.get(f"/api/books/{gid}/prepare", headers=H).json()
+            if st_["ready"] == st_["total"] and not st_["running"]:
+                break
+            _t.sleep(0.1)
+        assert st_["ready"] == st_["total"] == 5, st_
+        print("✔ préparation en avance : le serveur traduit et fabrique l'audio des passages suivants tout seul")
+        # « Préparer tout le livre » sur le gros livre, depuis la position de lecture, puis arrêt
+        tot = rag.progress(big)[1]
+        r = c.post(f"/api/books/{big}/prepare", headers=H, json={}).json()
+        assert r["total"] == tot and r["whole"], r
+        for _ in range(1200):                         # ~0,5 s par passage (ffmpeg réel)
+            st_ = c.get(f"/api/books/{big}/prepare", headers=H).json()
+            if st_["ready"] == tot:
+                break
+            _t.sleep(0.1)
+        assert st_["ready"] == tot and not st_["error"], st_
+        r = c.post(f"/api/books/{big}/prepare", headers=H, json={"stop": True}).json()
+        assert not r["running"], r
+        print(f"✔ « Préparer tout le livre » : {tot}/{tot} passages prêts à l'écoute, arrêt possible")
+    finally:
+        prepare.preparer.enabled = False; config.TTS_PROVIDER = old_tts
 
     # --- suppression : tout est nettoyé ---
     assert c.delete(f"/api/books/{zh}", headers=H).status_code == 200

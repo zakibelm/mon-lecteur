@@ -42,3 +42,27 @@ def translate(text: str, src_lang: str, prev: tuple[str, str] | None = None) -> 
     if not out:
         raise settings.LLMError("le modèle a renvoyé une traduction vide")
     return out, label
+
+
+_MARK = re.compile(r"\[(\d+)\]")
+
+
+def translate_batch(texts: list[str], src_lang: str, prev: tuple[str, str] | None = None) -> tuple[list[str], str]:
+    """Traduit plusieurs passages CONSÉCUTIFS en un seul appel (contexte du paragraphe, un seul démarrage du
+    modèle). Retourne (traductions dans l'ordre, étiquette). Lève ValueError si la réponse est mal numérotée :
+    l'appelant retombe alors sur une traduction passage par passage."""
+    client, model, label = settings.client_for("translate")
+    user = f"Langue source : {LANG_NAMES.get(src_lang, src_lang)}.\n"
+    if prev:
+        user += f"\nContexte précédent (déjà traduit, ne pas retraduire) :\n{prev[0]}\n→ {prev[1]}\n"
+    user += ("\nLes passages suivants se suivent dans le livre. Traduis CHAQUE passage en gardant exactement "
+             "ses numéros [1], [2]… en début de ligne, un passage par numéro, rien d'autre.\n\nTexte à traduire :\n")
+    user += "\n".join(f"[{i + 1}] {t}" for i, t in enumerate(texts))
+    raw = _THINK.sub("", client.chat(model, [{"role": "system", "content": SYSTEM},
+                                              {"role": "user", "content": user}], temperature=0.1, timeout=420))
+    parts = _MARK.split(raw)                       # ['avant', '1', 'texte 1', '2', 'texte 2', …]
+    found = {int(parts[i]): clean_output(parts[i + 1]) for i in range(1, len(parts) - 1, 2)}
+    out = [found.get(i + 1, "") for i in range(len(texts))]
+    if any(not o for o in out) or len(found) != len(texts):
+        raise ValueError(f"réponse groupée mal numérotée ({len(found)} blocs pour {len(texts)})")
+    return out, label

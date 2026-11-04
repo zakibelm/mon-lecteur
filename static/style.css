@@ -58,3 +58,5 @@ footer#player button { font-size:1.4rem; min-width:52px; }
 #books li.fresh { outline:2px solid var(--accent); }
 .pick { display:flex; gap:8px; align-items:center; margin-bottom:.5rem; }
 .pick select { flex:1; min-width:0; }
+.prep { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:.4rem 0; }
+.prep .muted { flex:1; min-width:12rem; }

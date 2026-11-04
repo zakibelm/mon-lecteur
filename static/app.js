@@ -199,6 +199,7 @@ async function openBook(id) {
   st.lastPage = 0; trimCache(-100);
   $("#book-title").textContent = st.book.title;
   $("#chk-translate").checked = !!st.book.translate;
+  refreshPrep().catch(() => {});
   jget("/books").then(fillBookPick).catch(() => {});
   await loadMoreSegments();
   $("#player").hidden = false; $("#reader-tools").hidden = false;
@@ -216,6 +217,25 @@ async function pollBook() {
     if (st.book.status !== "processing") clearInterval(st.poll);
   } catch (e) { note(e.message); }
 }
+/* ---------- Préparation à l'avance (traduction + audio côté serveur) ---------- */
+function showPrep(p) {
+  const pct = p.total ? Math.floor((100 * p.ready) / p.total) : 0;
+  $("#btn-prep").textContent = p.running && p.whole ? "⏹ Arrêter la préparation" : "⚡ Préparer tout le livre à l'avance";
+  $("#prep-msg").textContent = `Prêt à l'écoute sans attente : ${p.ready}/${p.total} passages (${pct} %)`
+    + (p.running ? (p.whole ? " — préparation en cours, même écran éteint ou app fermée" : " — les suivants se préparent") : "")
+    + (p.error ? ` — arrêtée : ${p.error}` : "");
+  clearTimeout(st.prepPoll);
+  if (p.running && st.book && !$("#view-reader").hidden)
+    st.prepPoll = setTimeout(() => refreshPrep().catch(() => {}), 5000);
+}
+async function refreshPrep() { if (st.book) showPrep(await jget(`/books/${st.book.id}/prepare`)); }
+$("#btn-prep").onclick = async () => {
+  if (!st.book) return;
+  const running = $("#btn-prep").textContent.startsWith("⏹");
+  try { showPrep(await jpost(`/books/${st.book.id}/prepare`, { stop: running })); }
+  catch (e) { $("#prep-msg").textContent = e.message; }
+};
+
 function updateStatus() {
   const b = st.book;
   note(b.status === "processing" ? `Extraction en cours : page ${b.pages_done}/${b.pages_total} (tu peux déjà lire)`

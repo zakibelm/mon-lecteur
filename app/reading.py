@@ -26,6 +26,39 @@ def _cached(c, book_id: str, idx: int):
                      (book_id, idx)).fetchone()
 
 
+BATCH_MAX = 8                       # passages par appel groupé
+BATCH_CHARS = {"cjk": 350, "autre": 900}   # taille max du texte source d'un appel (sortie ≈ 1,5×, CPU lent)
+
+
+def _translate_group(book, seg, prev) -> bool:
+    """Traduit d'un coup le passage demandé ET les suivants du même paragraphe (même langue, non traduits).
+    Retourne True si au moins le passage demandé a été traduit. Appelé sous _lock."""
+    lang = seg["lang"]
+    limit = BATCH_CHARS["cjk" if lang in ("zh", "ja", "ko") else "autre"]
+    with db() as c:
+        rows = c.execute("SELECT s.idx, s.text, s.lang FROM segments s LEFT JOIN translations t "
+                         "ON t.book_id=s.book_id AND t.idx=s.idx WHERE s.book_id=? AND s.idx>=? AND t.idx IS NULL "
+                         "ORDER BY s.idx LIMIT ?", (book["id"], seg["idx"], BATCH_MAX)).fetchall()
+    group, size = [], 0
+    for r in rows:
+        if r["idx"] != seg["idx"] + len(group) or r["lang"] != lang or not needs_translation(book, r):
+            break                                        # on s'arrête au premier trou, changement de langue…
+        if group and size + len(r["text"]) > limit:
+            break
+        group.append(r); size += len(r["text"])
+    if len(group) < 2:
+        return False                                     # un seul passage : traduction classique
+    try:
+        outs, label = tr.translate_batch([r["text"] for r in group], lang, prev)
+    except ValueError as e:                              # numérotation ratée : passage par passage
+        log.info("Traduction groupée abandonnée (%s #%s) : %s", book["id"], seg["idx"], e)
+        return False
+    with db() as c:
+        c.executemany("INSERT OR REPLACE INTO translations VALUES(?,?,?,?)",
+                      [(book["id"], r["idx"], o, label) for r, o in zip(group, outs)])
+    return True
+
+
 def needs_translation(book, seg) -> bool:
     return bool(book["translate"]) and seg["lang"] not in NO_TRANSLATE and bool(_HAS_LETTER.search(seg["text"]))
 
@@ -59,6 +92,11 @@ def resolve(book_id: str, idx: int) -> dict | None:
             return _result(seg, text=hit["text"], translated=True, model=hit["model"])
         prev = (prev_src["text"], prev_tr["text"]) if prev_src and prev_tr else None
         try:
+            if _translate_group(book, seg, prev):           # paragraphe entier en un appel
+                with db() as c:
+                    hit = _cached(c, book_id, idx)
+                if hit:
+                    return _result(seg, text=hit["text"], translated=True, model=hit["model"])
             out, label = tr.translate(seg["text"], seg["lang"], prev)
         except (LLMError, PermissionError) as e:
             log.warning("Traduction impossible (%s #%s) : %s", book_id, idx, e)

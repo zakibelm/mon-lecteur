@@ -1,5 +1,4 @@
 """API du lecteur de livres : upload, segments, audio à la demande, progression, chat RAG + PWA."""
-import hashlib
 import logging
 import re
 import secrets
@@ -14,7 +13,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import config, db as database, detect, extract, rag, reading, settings
+from . import config, db as database, detect, extract, prepare, rag, reading, settings
 from .db import db
 from .llm import LLMError
 from . import tts
@@ -75,6 +74,10 @@ class Retranslate(BaseModel):
     idx: int | None = Field(default=None, ge=0)     # None = tout le livre
 
 
+class Prepare(BaseModel):
+    stop: bool = False
+
+
 class RoleTest(BaseModel):
     role: str
 
@@ -128,6 +131,7 @@ def process_book(book_id: str, src: Path, lang: str = "auto") -> None:
         with db() as c:
             c.execute("UPDATE books SET status='error', error=? WHERE id=?", (str(e)[:300], book_id))
         return
+    prepare.preparer.ahead(book_id, -1, 10)       # démarrage instantané : les 10 premiers passages d'avance
     _index_quietly(book_id)
 
 
@@ -231,35 +235,41 @@ def read_segment(book_id: str, idx: int):
     res = reading.resolve(book_id, idx)
     if res is None:
         raise HTTPException(404, "Segment introuvable")
+    prepare.preparer.ahead(book_id, idx)
     return res
 
 
 @app.get("/api/books/{book_id}/segments/{idx}/audio", dependencies=[Depends(auth)])
 def get_audio(book_id: str, idx: int):
-    provider = get_provider()
-    if not provider.server_audio:
+    if not get_provider().server_audio:
         return Response(status_code=204)          # la PWA lit le texte avec la voix de l'appareil
-    res = reading.resolve(book_id, idx)
-    if res is None:
-        raise HTTPException(404, "Segment introuvable")
-    if res["error"]:
-        raise HTTPException(502, f"Traduction impossible : {res['error']}")
-    voice = res["voice_lang"]
-    if voice not in config.PIPER_VOICES:
-        raise HTTPException(422, f"Pas de voix serveur pour « {voice} » : active la traduction vers le français "
-                                 "ou lis avec la voix de l'appareil")
-    gender = settings.load()["voice"]
-    model = tts.voice_path(voice, gender)
-    key = hashlib.sha1(f"{model}|{res['text']}".encode()).hexdigest()[:10]   # autre texte ou autre voix → autre fichier
-    path = config.DATA_DIR / "books" / book_id / "audio" / f"{idx}-{key}.mp3"
-    if not path.exists():                          # génération à la demande puis cache disque
-        path.parent.mkdir(exist_ok=True)
-        try:
-            provider.synthesize(res["text"], voice, path, gender)
-        except Exception:
-            log.exception("TTS en échec (%s #%s)", book_id, idx)
-            raise HTTPException(500, "Échec de la synthèse vocale")
+    try:
+        path = prepare.audio_file(book_id, idx)
+    except prepare.AudioError as e:
+        raise HTTPException(e.status, str(e))
+    prepare.preparer.ahead(book_id, idx)          # les passages suivants se préparent pendant l'écoute
     return FileResponse(path, media_type="audio/mpeg")
+
+
+@app.post("/api/books/{book_id}/prepare", dependencies=[Depends(auth)])
+def prepare_book(book_id: str, body: Prepare):
+    """« Préparer tout le livre » : traduction + audio jusqu'à la fin, en tâche de fond (ou arrêt)."""
+    with db() as c:
+        book = _book_or_404(c, book_id)
+    if book["status"] != "ready":
+        raise HTTPException(409, "Le livre n'est pas prêt")
+    if body.stop:
+        prepare.preparer.stop(book_id)
+    else:
+        prepare.preparer.whole_book(book_id, book["progress_idx"])
+    return prepare.status(book_id)
+
+
+@app.get("/api/books/{book_id}/prepare", dependencies=[Depends(auth)])
+def prepare_status(book_id: str):
+    with db() as c:
+        _book_or_404(c, book_id)
+    return prepare.status(book_id)
 
 
 @app.put("/api/books/{book_id}/progress", dependencies=[Depends(auth)])
