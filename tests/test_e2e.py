@@ -155,6 +155,17 @@ def test_detect():
     assert detect.detect_lang("12") == "und" and detect.detect_lang("") == "und"
     assert detect.dominant_lang([("fr", 10), ("en", 500), ("und", 9999)]) == "en"
     print("✔ détection de langue : zh/ja/ko/ar/fr/en + numéros ignorés")
+    # imports simultanés juste après un démarrage : processus NEUF, plusieurs fils dès le 1er appel
+    code = ("import sys, threading, collections; sys.path.insert(0, %r); from app import detect\n"
+            "T = 'Le gros livre de test commence ici. Il contient une très grande annexe.'\n"
+            "r = collections.Counter(); L = threading.Lock(); go = threading.Event()\n"
+            "def w():\n    go.wait()\n    for _ in range(10):\n        x = detect.detect_lang(T)\n"
+            "        with L: r[x] += 1\n"
+            "ts = [threading.Thread(target=w) for _ in range(4)]; [t.start() for t in ts]; go.set(); [t.join() for t in ts]\n"
+            "print(dict(r))") % str(ROOT)
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True).stdout.strip()
+    assert out == "{'fr': 40}", f"détection instable en parallèle : {out}"
+    print("✔ détection fiable avec plusieurs imports simultanés dès le démarrage")
 
 
 def test_chunk_cjk():
@@ -481,9 +492,23 @@ def main():
         old = config.MAX_UPLOAD_MB; config.MAX_UPLOAD_MB = 0
         assert c.post("/api/books", headers=H, files={"file": ("a.pdf", b"12345", "application/pdf")}).status_code == 413
         config.MAX_UPLOAD_MB = old
+        assert config.MAX_UPLOAD_MB >= 350, "la limite par défaut doit accepter un livre de 350 Mo"
+        assert c.get("/api/config", headers=H).json()["max_upload_mb"] == config.MAX_UPLOAD_MB
+        import app.main as main_mod
+        from collections import namedtuple
+        real_du = main_mod.shutil.disk_usage
+        main_mod.shutil.disk_usage = lambda p: namedtuple("du", "total used free")(10**9, 10**9, 10 * 2**20)   # 10 Mo libres
+        n_before = len(list((config.DATA_DIR / "books").iterdir()))
+        try:
+            r = c.post("/api/books", headers=H, files={"file": ("gros.pdf", b"%PDF" + b"0" * 4096, "application/pdf")})
+            assert r.status_code == 507 and "Espace disque insuffisant" in r.json()["detail"], r.text
+            assert len(list((config.DATA_DIR / "books").iterdir())) == n_before, "aucun dossier créé si le disque manque"
+        finally:
+            main_mod.shutil.disk_usage = real_du
         bad = c.post("/api/books", headers=H, files={"file": ("vide.pdf", b"pas un pdf", "application/pdf")}).json()["id"]
         assert c.get(f"/api/books/{bad}", headers=H).json()["status"] == "error"
         print("✔ image OCR, formats/langue/taille rejetés, PDF corrompu → statut error")
+        print(f"✔ gros fichiers : limite {config.MAX_UPLOAD_MB} Mo exposée à la page, disque insuffisant → 507 sans rien écrire")
 
         # --- sécurité chemin + suppression + PWA servie ---
         assert c.get("/api/books/..%2F..%2Fetc/segments", headers=H).status_code == 404

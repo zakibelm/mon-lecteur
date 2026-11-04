@@ -1,9 +1,16 @@
 """Détection de la langue d'un segment : scripts (zh/ja/ko/ar) puis `langdetect` pour l'écriture latine."""
 import re
+import threading
 
 from langdetect import DetectorFactory, LangDetectException, detect
+from langdetect.detector_factory import init_factory
 
 DetectorFactory.seed = 0      # résultats reproductibles
+# langdetect charge ses profils au PREMIER appel, sans verrou : deux imports simultanés juste après un démarrage
+# donnaient « und » ou une mauvaise langue (mesuré : un texte français classé catalan, donc « traduit »).
+# Chargement immédiat, et appels sérialisés (la détection prend ~1 ms).
+init_factory()
+_detect_lock = threading.Lock()
 
 _HAN = re.compile(r"[一-鿿㐀-䶿]")
 _KANA = re.compile(r"[぀-ヿ]")
@@ -40,7 +47,8 @@ def detect_lang(text: str) -> str:
     if len(letters) < 12:
         return "und"                 # trop court pour un détecteur statistique fiable
     try:
-        code = detect(t)
+        with _detect_lock:
+            code = detect(t)
     except LangDetectException:
         return "und"
     return code.split("-")[0]

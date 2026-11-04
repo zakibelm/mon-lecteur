@@ -24,6 +24,7 @@ UPLOAD_LANGS = {"auto": "Détection automatique", "fr": "Français", "en": "Angl
                 "zh": "Chinois simplifié", "zh-tw": "Chinois traditionnel", "ja": "Japonais", "ko": "Coréen"}
 _HAS_LETTER = re.compile(r"[^\W\d_]", re.UNICODE)
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+DISK_MARGIN = 500 * 2**20         # espace libre minimal laissé après la copie d'un document
 
 
 @asynccontextmanager
@@ -129,7 +130,8 @@ def _index_quietly(book_id: str) -> None:
 def get_config():
     p = get_provider()
     return {"tts": p.name, "server_audio": p.server_audio, "voice_langs": list(config.PIPER_VOICES),
-            "upload_langs": UPLOAD_LANGS, "auto_translate": settings.load()["auto_translate"]}
+            "upload_langs": UPLOAD_LANGS, "auto_translate": settings.load()["auto_translate"],
+            "max_upload_mb": config.MAX_UPLOAD_MB}
 
 
 @app.post("/api/books", dependencies=[Depends(auth)])
@@ -141,6 +143,13 @@ def upload(background: BackgroundTasks, file: UploadFile = File(...),
     if lang not in UPLOAD_LANGS:
         raise HTTPException(400, f"Langue non supportée : {lang}")
     do_translate = settings.load()["auto_translate"] if translate == "" else translate.lower() in ("1", "true", "on", "yes")
+    expected = file.size or 0                       # taille annoncée (le fichier est déjà reçu, en tampon disque)
+    if expected > config.MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(413, f"Fichier trop volumineux (max {config.MAX_UPLOAD_MB} Mo)")
+    free = shutil.disk_usage(config.DATA_DIR).free
+    if free < expected + DISK_MARGIN:               # copie + images OCR + audio : on garde de la marge
+        raise HTTPException(507, f"Espace disque insuffisant sur le serveur : {free // 2**20} Mo libres, "
+                                 f"{(expected + DISK_MARGIN) // 2**20} Mo nécessaires")
     book_id = uuid.uuid4().hex[:12]
     folder = config.DATA_DIR / "books" / book_id
     folder.mkdir(parents=True)

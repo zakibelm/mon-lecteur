@@ -14,6 +14,8 @@ set -euo pipefail
 DOMAIN="${1:?usage : nginx-site.sh DOMAINE [PORT_APP]}"
 APP_PORT="${2:-$(grep '^APP_PORT=' /opt/lecteur/.env 2>/dev/null | cut -d= -f2-)}"
 APP_PORT="${APP_PORT:-8000}"
+MAX_MB="$(grep '^MAX_UPLOAD_MB=' /opt/lecteur/.env 2>/dev/null | cut -d= -f2-)"
+BODY_MB=$(( ${MAX_MB:-1024} * 11 / 10 ))
 STAMP="$(date +%F-%H%M%S)"
 WEBROOT=/var/www/lecteur-acme
 CERT_DIR="${CERT_DIR:-/etc/letsencrypt/live/$DOMAIN}"
@@ -59,10 +61,12 @@ ok "/root/nginx-sauvegarde-${STAMP}.tgz"
 
 write_conf() {   # write_conf http|https
   local proxy="
-    client_max_body_size 110m;
+    client_max_body_size ${BODY_MB}m;   # MAX_UPLOAD_MB de l'app + 10 % (en-têtes multipart)
+    client_body_timeout 300s;         # tablette en 4G : pauses possibles pendant un gros envoi
     location / {
         proxy_pass http://127.0.0.1:${APP_PORT};
         proxy_http_version 1.1;
+        proxy_request_buffering off;  # gros PDF transmis au fil de l'eau (pas de copie disque côté nginx)
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;

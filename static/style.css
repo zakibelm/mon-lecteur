@@ -53,3 +53,8 @@ footer#player button { font-size:1.4rem; min-width:52px; }
 .role-res.ok { color:#15803d; } .role-res.err { color:#b91c1c; }
 .warn-box { background:#fef3c7; color:#78350f; border-radius:10px; padding:8px 10px; font-size:.85rem; }
 :root.dark .warn-box { background:#422006; color:#fde68a; }
+
+#upload-bar { width:100%; height:.6rem; margin-top:.5rem; accent-color:var(--accent, #60a5fa); }
+#books li.fresh { outline:2px solid var(--accent); }
+.pick { display:flex; gap:8px; align-items:center; margin-bottom:.5rem; }
+.pick select { flex:1; min-width:0; }

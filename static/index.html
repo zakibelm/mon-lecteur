@@ -23,18 +23,21 @@
   <main>
     <section id="view-library" class="view">
       <form id="upload-form">
-        <input type="file" id="file" accept=".pdf,.png,.jpg,.jpeg" required>
-        <input type="text" id="title" placeholder="Titre (optionnel)">
+        <input type="file" id="file" accept=".pdf,.png,.jpg,.jpeg" multiple required aria-label="Un ou plusieurs livres">
+        <p id="file-info" class="muted" style="margin:0">Tu peux choisir plusieurs fichiers à la fois (jusqu'à 1 Go chacun).</p>
+        <input type="text" id="title" placeholder="Titre (optionnel, pour un seul fichier)">
         <select id="lang" aria-label="Langue du document"></select>
         <p class="muted" style="margin:0">Scans chinois, japonais, coréen ou arabe : l'écriture est reconnue automatiquement. Seul le chinois traditionnel doit être choisi ici.</p>
         <label class="check"><input type="checkbox" id="translate" checked> Traduire en français si le document est dans une autre langue</label>
         <button type="submit">Importer</button>
       </form>
+      <progress id="upload-bar" max="1" value="0" hidden></progress>
       <p id="upload-msg" class="muted"></p>
       <ul id="books"></ul>
     </section>
 
     <section id="view-reader" class="view" hidden>
+      <label id="book-pick-wrap" class="pick">Livre : <select id="book-pick" aria-label="Choisir le livre à lire"></select></label>
       <h2 id="book-title">Aucun livre ouvert</h2>
       <p id="book-status" class="muted"></p>
       <div id="reader-tools" hidden>

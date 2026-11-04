@@ -4,7 +4,7 @@ const audio = $("#audio");
 const st = {
   auth: localStorage.getItem("token") || "", cfg: null, book: null, segs: [], cur: -1,
   playing: false, playId: 0, speed: 1, cache: new Map(), reads: new Map(), poll: null, saveTimer: null,
-  lastPage: 0, settings: null, models: {},
+  lastPage: 0, settings: null, models: {}, fresh: new Set(), libPoll: null,
 };
 
 /* ---------- API ---------- */
@@ -51,6 +51,22 @@ function applyTheme() {
 }
 
 /* ---------- Bibliothèque ---------- */
+function readBook(id) {
+  st.fresh.delete(id);
+  showView("reader");
+  return openBook(id).catch((e) => note(e.message));
+}
+function fillBookPick(books) {           // menu « Livre » de l'écran de lecture
+  const sel = $("#book-pick");
+  sel.replaceChildren(el("option", books.length ? "— choisir un livre —" : "Aucun livre : importe-en un", ""));
+  sel.firstChild.value = "";
+  for (const b of books) {
+    const o = el("option", b.title + (b.status === "processing" ? " (extraction…)" : b.status === "error" ? " (erreur)" : ""));
+    o.value = b.id; o.disabled = b.status === "error";
+    if (st.book && st.book.id === b.id) o.selected = true;
+    sel.append(o);
+  }
+}
 function el(tag, text, cls) {
   const e = document.createElement(tag);
   if (text !== undefined) e.textContent = text;
@@ -59,10 +75,15 @@ function el(tag, text, cls) {
 }
 async function loadLibrary() {
   const books = await jget("/books");
+  fillBookPick(books);
   const ul = $("#books");
   ul.replaceChildren();
+  clearTimeout(st.libPoll);                       // extraction en cours : la liste se met à jour seule
+  if (books.some((b) => b.status === "processing") && !$("#view-library").hidden)
+    st.libPoll = setTimeout(() => loadLibrary().catch(() => {}), 3000);
   for (const b of books) {
     const li = el("li");
+    if (st.fresh.has(b.id)) li.classList.add("fresh");
     const info = el("div");
     const title = el("strong", b.title);
     if (b.lang && b.lang !== "fr" && b.lang !== "auto") title.append(el("span", b.lang.toUpperCase(), "badge"));
@@ -71,8 +92,8 @@ async function loadLibrary() {
         : b.status === "error" ? "Erreur : " + b.error
         : `${b.pages_total} p. · ${b.n_segments} passages`, "muted"));
     const actions = el("div", undefined, "actions");
-    const open = el("button", "Ouvrir");
-    open.onclick = () => openBook(b.id).catch((e) => ($("#upload-msg").textContent = e.message));
+    const open = el("button", st.book && st.book.id === b.id ? "Reprendre" : "Lire");
+    open.onclick = () => readBook(b.id);
     const del = el("button", "🗑");
     del.onclick = async () => {
       if (!confirm(`Supprimer « ${b.title} » ?`)) return;
@@ -95,14 +116,75 @@ $("#upload-form").onsubmit = async (ev) => {
   fd.append("title", $("#title").value);
   fd.append("lang", $("#lang").value);
   fd.append("translate", $("#translate").checked ? "1" : "0");
-  msg.textContent = "Envoi en cours…";
+  const files = [...$("#file").files];
+  const max = (st.cfg && st.cfg.max_upload_mb) || 0;
+  const tooBig = files.filter((f) => max && f.size > max * 1048576);   // refus immédiat, sans rien envoyer
+  const todo = files.filter((f) => !tooBig.includes(f));
+  const bar = $("#upload-bar"), btn = ev.target.querySelector("button[type=submit]");
+  const done = [], failed = tooBig.map((f) => `${f.name} : trop volumineux (${mo(f.size)} Mo, max ${max} Mo)`);
+  bar.hidden = false; btn.disabled = true;
   try {
-    const { id } = await jget("/books", { method: "POST", body: fd });
-    msg.textContent = "";
-    ev.target.reset();
-    await openBook(id);
-  } catch (e) { msg.textContent = e.message; }
+    for (const [i, f] of todo.entries()) {        // l'un après l'autre : plus fiable sur une connexion mobile
+      const one = new FormData();
+      for (const [k, v] of fd.entries()) if (k !== "file" && k !== "title") one.append(k, v);
+      one.append("file", f);
+      one.append("title", todo.length === 1 && files.length === 1 ? $("#title").value : "");
+      const head = todo.length > 1 ? `Fichier ${i + 1}/${todo.length} « ${f.name} » — ` : "";
+      bar.value = 0;
+      try {
+        const { id } = await uploadWithProgress(one, (sent, total) => {
+          bar.value = total ? sent / total : 0;
+          msg.textContent = head + (sent < total
+            ? `envoi ${Math.floor((100 * sent) / total)} % (${mo(sent)} / ${mo(total)} Mo) — garde cette page ouverte`
+            : "reçu, enregistrement sur le serveur…");
+        });
+        done.push(id); st.fresh.add(id);
+      } catch (e) { failed.push(`${f.name} : ${e.message}`); }
+    }
+  } finally { bar.hidden = true; btn.disabled = false; }
+  ev.target.reset(); updateFileInfo();
+  if (done.length === 1 && files.length === 1) { msg.textContent = ""; return readBook(done[0]); }   // un seul livre : on l'ouvre
+  msg.textContent = (done.length ? `${done.length} livre(s) importé(s), surligné(s) ci-dessous : choisis celui à lire.` : "Aucun livre importé.")
+    + (failed.length ? " Échecs — " + failed.join(" ; ") : "");
+  await loadLibrary().catch(() => {});
 };
+
+function updateFileInfo() {
+  const files = [...$("#file").files];
+  const total = files.reduce((n, f) => n + f.size, 0);
+  $("#title").disabled = files.length > 1;
+  $("#file-info").textContent = files.length > 1
+    ? `${files.length} fichiers sélectionnés (${mo(total)} Mo) : chacun devient un livre, titré d'après son nom.`
+    : "Tu peux choisir plusieurs fichiers à la fois" + (st.cfg ? ` (jusqu'à ${st.cfg.max_upload_mb >= 1024 ? st.cfg.max_upload_mb / 1024 + " Go" : st.cfg.max_upload_mb + " Mo"} chacun).` : ".");
+}
+$("#file").onchange = updateFileInfo;
+$("#book-pick").onchange = (e) => { if (e.target.value) openBook(e.target.value).catch((err) => note(err.message)); };
+
+const mo = (n) => (n / 1048576).toFixed(n < 10485760 ? 1 : 0);
+
+/* Envoi par XMLHttpRequest : contrairement à fetch, il donne la progression de l'envoi (gros PDF). */
+function uploadWithProgress(fd, onProgress) {
+  if (!st.auth) askToken();
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open("POST", "/api/books");
+    x.setRequestHeader("Authorization", "Bearer " + st.auth);
+    x.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded, e.total); };
+    x.onerror = () => reject(new Error("Connexion interrompue pendant l'envoi : réessaie (Wi-Fi conseillé pour un gros fichier)."));
+    x.onload = () => {
+      let d = {};
+      try { d = JSON.parse(x.responseText); } catch { /* réponse non JSON (proxy) */ }
+      if (x.status === 401) {
+        st.auth = ""; localStorage.removeItem("token");
+        return uploadWithProgress(fd, onProgress).then(resolve, reject);
+      }
+      if (x.status === 413) return reject(new Error(typeof d.detail === "string" ? d.detail : "Fichier trop volumineux pour le serveur."));
+      if (x.status < 200 || x.status >= 300) return reject(new Error(typeof d.detail === "string" ? d.detail : "Erreur " + x.status));
+      resolve(d);
+    };
+    x.send(fd);
+  });
+}
 
 /* ---------- Lecteur ---------- */
 function closeBook() {
@@ -117,6 +199,7 @@ async function openBook(id) {
   st.lastPage = 0; trimCache(-100);
   $("#book-title").textContent = st.book.title;
   $("#chk-translate").checked = !!st.book.translate;
+  jget("/books").then(fillBookPick).catch(() => {});
   await loadMoreSegments();
   $("#player").hidden = false; $("#reader-tools").hidden = false;
   showView("reader");
@@ -502,6 +585,8 @@ audio.onended = () => next();
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
   try {
     st.cfg = await jget("/config");
+    updateFileInfo();
+    jget("/books").then(fillBookPick).catch(() => {});
     for (const [code, label] of Object.entries(st.cfg.upload_langs)) {
       const o = el("option", label); o.value = code; $("#lang").append(o);
     }

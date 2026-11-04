@@ -177,7 +177,7 @@ else
     bash "$APP_DIR/vps/nginx-site.sh" "$DOMAIN" "$APP_PORT" || fail "Publication via nginx en échec (voir ci-dessus)."
   elif [ -n "$BUSY" ]; then
     warn "Les ports 80/443 sont déjà utilisés par un autre service (Traefik, conteneur…). Caddy n'est PAS touché."
-    echo "   Ajoute à ton reverse proxy existant : ${DOMAIN} → http://127.0.0.1:${APP_PORT} (taille max du corps : 110 Mo)."
+    echo "   Ajoute à ton reverse proxy existant : ${DOMAIN} → http://127.0.0.1:${APP_PORT} (taille max du corps : MAX_UPLOAD_MB + 10 %, sans mise en tampon : proxy_request_buffering off)."
   else
     apt-get install -y -qq caddy
     BLOCK="${DOMAIN} {

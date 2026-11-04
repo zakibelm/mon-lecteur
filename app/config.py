@@ -4,7 +4,7 @@ from pathlib import Path
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).resolve()
 API_TOKEN = os.getenv("API_TOKEN", "").strip()   # obligatoire, vérifié au démarrage par validate()
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "100"))
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "1024"))   # 1 Go par fichier ; le proxy accepte 10 % de plus
 
 # --- Extraction / OCR ---
 OCR_LANG = os.getenv("OCR_LANG", "fra+eng")      # ajouter +ara si tesseract-ocr-ara est installé
