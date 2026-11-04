@@ -9,6 +9,7 @@ MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "1024"))   # 1 Go par fichier ; l
 # --- Extraction / OCR ---
 OCR_LANG = os.getenv("OCR_LANG", "fra+eng")      # ajouter +ara si tesseract-ocr-ara est installé
 OCR_DPI = int(os.getenv("OCR_DPI", "300"))
+PREPARE_SCANS = os.getenv("OCR_PREPARE", "1") != "0"   # scans : remise à l'endroit + redressement avant l'OCR
 MAX_CHARS = int(os.getenv("SEGMENT_MAX_CHARS", "500"))
 MAX_CHARS_CJK = int(os.getenv("SEGMENT_MAX_CHARS_CJK", "160"))   # 1 caractère CJK ≈ 1 mot : segments plus courts
 MERGE = os.getenv("SEGMENT_MERGE", "1") != "0"   # regrouper les phrases/blocs courts en paragraphes (~30 s d'écoute)

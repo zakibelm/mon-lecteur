@@ -366,6 +366,25 @@ def v22_tests(c):
     assert "오늘 아침 서울에는" in got and "내렸습니다. 사람들은" in got, got
     print("✔ coréen : espaces entre mots conservés (extraction, nettoyage, découpage)")
 
+    # --- scans difficiles : page à l'envers et chinois penché, remis droits avant l'OCR ---
+    import difflib as _dl
+    from PIL import Image as _Im
+    def _scan(text, font, angle=0.0, flip=False):
+        src = fitz.open(); sp = src.new_page(); sp.insert_textbox(fitz.Rect(60, 60, 535, 600), text, fontsize=14 if font == "helv" else 18, fontname=font)
+        im = _Im.open(io.BytesIO(sp.get_pixmap(dpi=200).tobytes("png"))).convert("L")
+        if angle: im = im.rotate(angle, resample=_Im.BICUBIC, expand=True, fillcolor=255)
+        if flip: im = im.rotate(180)
+        b_ = io.BytesIO(); im.save(b_, "PNG"); d = fitz.open(); pg = d.new_page(width=im.width * 0.36, height=im.height * 0.36)
+        pg.insert_image(pg.rect, stream=b_.getvalue()); return d.tobytes()
+    FRX = "Le vent soufflait fort sur la lande ce soir-là, et les arbres pliaient sous les rafales. Marie referma la porte de la ferme."
+    ZHX = "这座古老的城市有两千多年的历史。每年春天，成千上万的游客来这里欣赏盛开的樱花。河边有许多小餐馆和茶馆。"
+    for label, data, ref in (("à l'envers", _scan(FRX, "helv", flip=True), FRX), ("chinois penché 3°", _scan(ZHX, "china-s", angle=3.0), ZHX)):
+        sb = upload(c, data, "scan-difficile.pdf")
+        got = "".join(x["original"] for x in c.get(f"/api/books/{sb}/segments", headers=H).json())
+        ratio = _dl.SequenceMatcher(None, ref.replace(" ", ""), got.replace(" ", "")).ratio()
+        assert ratio >= 0.9, (label, f"{ratio:.0%}", got[:60])
+    print("✔ scans difficiles : page à l'envers et chinois penché remis droits avant l'OCR (≥ 90 % du texte)")
+
     # --- couverture (1re page) + titre/auteur du PDF quand aucun titre n'est donné ---
     d_ = fitz.open(); d_.new_page().insert_textbox(fitz.Rect(50, 50, 550, 300), "Couverture du livre de test, page une.", fontsize=20)
     d_.set_metadata({"title": "Le Grand Voyage", "author": "Jeanne Martin"})
