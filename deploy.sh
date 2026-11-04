@@ -167,13 +167,16 @@ done
 if [ "$ok" -ne 1 ]; then journalctl -u lecteur -n 30 --no-pager; fail "Le service ne répond pas."; fi
 echo "✔ Service actif et authentifié"
 
-say "9. HTTPS (Caddy) — seulement si DOMAIN est défini et si 80/443 sont libres ou déjà à Caddy"
+say "9. HTTPS — seulement si DOMAIN est défini : nginx existant (site ajouté), sinon Caddy si 80/443 sont libres"
 if [ -z "$DOMAIN" ]; then
   warn "DOMAIN non défini : pas d'accès public. Test possible par tunnel : ssh -L ${APP_PORT}:127.0.0.1:${APP_PORT} utilisateur@vps"
 else
   BUSY="$(ss -ltnpH '( sport = :80 or sport = :443 )' 2>/dev/null | grep -v '"caddy"' || true)"
-  if [ -n "$BUSY" ]; then
-    warn "Les ports 80/443 sont déjà utilisés par un autre service (nginx, Traefik…). Caddy n'est PAS touché."
+  if [ -n "$BUSY" ] && echo "$BUSY" | grep -q '"nginx"' && command -v nginx >/dev/null; then
+    echo "80/443 tenus par le nginx de l'hôte : ajout d'un site dédié (aucun fichier existant modifié)."
+    bash "$APP_DIR/vps/nginx-site.sh" "$DOMAIN" "$APP_PORT" || fail "Publication via nginx en échec (voir ci-dessus)."
+  elif [ -n "$BUSY" ]; then
+    warn "Les ports 80/443 sont déjà utilisés par un autre service (Traefik, conteneur…). Caddy n'est PAS touché."
     echo "   Ajoute à ton reverse proxy existant : ${DOMAIN} → http://127.0.0.1:${APP_PORT} (taille max du corps : 110 Mo)."
   else
     apt-get install -y -qq caddy

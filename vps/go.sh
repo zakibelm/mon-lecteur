@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/zakibelm/mon-lecteur/ccr-1c070716-hb1ckb/vps/go.sh -o /root/lecteur-go.sh && sudo bash /root/lecteur-go.sh
 #
 # Options (variables d'environnement, toutes facultatives) :
-#   DOMAIN=lecteur.xtream.space   sous-domaine (option A, utilisé seulement si son DNS pointe déjà vers ce VPS)
+#   DOMAIN=lecteur.partageons.net sous-domaine (option A, utilisé seulement si son DNS pointe déjà vers ce VPS)
 #   OMNI_KEY=...                  clé d'API OmniRoute si OmniRoute en exige une (jamais affichée)
 #   OMNI_MODEL=...                route OmniRoute GRATUITE à tester/benchmarker (sinon choix prudent automatique)
 #   SKIP_7B=1                     ne pas télécharger qwen2.5:7b
@@ -17,7 +17,7 @@ set -uo pipefail
 REPO=https://github.com/zakibelm/mon-lecteur
 BRANCH=ccr-1c070716-hb1ckb
 APP=/opt/lecteur
-DOMAIN="${DOMAIN:-lecteur.xtream.space}"
+DOMAIN="${DOMAIN:-lecteur.partageons.net}"
 STAMP="$(date +%F-%H%M%S)"
 LOG="/root/lecteur-rapport-$STAMP.txt"
 [ "$(id -u)" -eq 0 ] || { echo "Lance avec sudo."; exit 1; }
@@ -71,7 +71,7 @@ PUBIP="$(curl -4 -fs --max-time 5 https://api.ipify.org || hostname -I | awk '{p
 DNSIP="$(getent ahostsv4 "$DOMAIN" | awk 'NR==1{print $1}')"
 MODE=B
 if [ -n "$DNSIP" ] && [ "$DNSIP" = "$PUBIP" ]; then
-  if [ -z "$PORTS_80_443" ] || echo "$PORTS_80_443" | grep -q '"caddy"'; then MODE=A; fi
+  if [ -z "$PORTS_80_443" ] || echo "$PORTS_80_443" | grep -qE '"(caddy|nginx)"'; then MODE=A; fi
 fi
 echo "IP publique du VPS : $PUBIP ; $DOMAIN → ${DNSIP:-aucun enregistrement} ; mode retenu : $MODE"
 DEPLOY_DOMAIN=""; [ "$MODE" = A ] && DEPLOY_DOMAIN="$DOMAIN"
@@ -125,7 +125,10 @@ say "6. ACCÈS DEPUIS LA TABLETTE"
 URL=""
 if [ "$MODE" = A ]; then
   URL="https://$DOMAIN"
-  echo "Option A : $DOMAIN pointe déjà vers ce VPS et 80/443 sont libres ou à Caddy."
+  echo "Option A : $DOMAIN pointe déjà vers ce VPS ($PUBIP) ; publié par le proxy de l'hôte (nginx : site ajouté)."
+  CODE="$(curl --noproxy '*' -s --max-time 15 "$URL/manifest.webmanifest" | grep -c '"name": "Lecteur de livres"')"
+  [ "$CODE" = 1 ] && res ✔ "HTTPS public OK : $URL/manifest.webmanifest (certificat valide, contenu du Lecteur)" \
+    || res ✖ "HTTPS public non vérifié sur $URL"
 elif command -v tailscale >/dev/null && TSJ="$(tailscale status --json 2>/dev/null)"; then
   echo "Option B : $DOMAIN ne pointe pas vers ce VPS (${DNSIP:-NXDOMAIN}) → Tailscale Serve (HTTPS privé, sans DNS public)."
   TSNAME="$(printf '%s' "$TSJ" | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')"
